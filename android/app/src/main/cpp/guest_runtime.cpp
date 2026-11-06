@@ -1357,6 +1357,7 @@ void quiesceGuestFilesForExit(int timeoutMs){
 }
 void setGuestPaused(bool paused) {guestPaused=paused;}
 bool guestDrivingControls() {return inputDrivingMode.load();}
+int guestMoviesOpen() {return movieOpenCount.load();}
 extern "C" int nfsGuestDriving(){return inputDrivingMode.load()?1:0;}
 void setGuestPad(const float axes[6],uint32_t buttons,int hatX,int hatY){
     std::lock_guard<std::mutex> lock(inputMutex);

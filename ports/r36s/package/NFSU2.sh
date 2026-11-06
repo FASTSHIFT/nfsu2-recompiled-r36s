@@ -184,6 +184,9 @@ NFSU2_DRAW_DIST=200
 NFSU2_LANG=Spanish
 [ -f "$GAMEDIR/nfsu2.cfg" ] && . "$GAMEDIR/nfsu2.cfg"
 export NFSU2_DRAW_DIST NFSU2_LANG
+# NFSU2_SKIP_INTRO=1: the intro movies (EA logo, THX, PSA, opening FMV) are reported to the game as missing, so it goes
+# straight on to the title screen. 0 plays them (they cannot be skipped by a button press).
+[ "${NFSU2_SKIP_INTRO:-0}" = "1" ] && export NFSU2_SKIP_MOVIES="${NFSU2_SKIP_MOVIES:-ealogo,thx_logo,psa,fmvopening}"
 for v in NFSU2_ASPECT NFSU2_RENDER_SCALE NFSU2_RENDER NFSU2_SCREEN NFSU2_ROTATE NFSU2_SHOW_FPS; do
   eval "[ -n \"\${$v:-}\" ] && export $v"
 done
@@ -240,7 +243,7 @@ fi
 # Launch game: GLES 2.0 at the screen's native resolution (see Display above)
 LANG_ARG="--lang=$NFSU2_LANG"
 echo "[NFSU2] running $BIN" > "$GAMEDIR/log.txt"
-"./$BIN" "$GAMEDIR/gamedata" $CAP_ARG $LANG_ARG >> "$GAMEDIR/log.txt" 2>&1
+"./$BIN" "$GAMEDIR/gamedata" $CAP_ARG "$LANG_ARG" >> "$GAMEDIR/log.txt" 2>&1
 EXIT_CODE=$?
 
 # Get everything onto the card before the console returns to the menu (people often switch off right

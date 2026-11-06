@@ -1923,12 +1923,16 @@ STDMETHODIMP IDirect3DDevice9GLES::Present(const RECT* pSourceRect, const RECT* 
     // Frames 0..800 every 10: the boot/loading screen, the EA Games / THX / legal-screen intro quads and
     // the front-end menus all live there. The old sparse list started at frame 30 and jumped 400 -> 600, so
     // those screens (and the two quad siblings that only draw during the intro) were never captured.
-    if (captureDiagnosticFrames &&
+    // NFSU2_SHOT_EVERY=N: one back-buffer capture (diag_frame_<frame>.ppm) every N presented frames, so an
+    // unattended run can be followed on screen afterwards (menu navigation, race start).
+    static const unsigned shotEvery = std::getenv("NFSU2_SHOT_EVERY") ? static_cast<unsigned>(std::atoi(std::getenv("NFSU2_SHOT_EVERY"))) : 0;
+    if ((captureDiagnosticFrames &&
         ((frame <= 800 && frame % 10 == 0) ||
          (frame <= 1800 && (frame == 30 || frame == 60 || frame == 180 || frame == 400 || frame == 600 ||
                             frame == 800 || frame == 1000 || frame == 1150 || frame == 1250 || frame == 1400 ||
                             frame == 1600 || frame == 1800)) ||
-         (frame > 1800 && frame <= 2450 && (frame % 50 == 0 || frame == 2401)))) {
+         (frame > 1800 && frame <= 2450 && (frame % 50 == 0 || frame == 2401)))) ||
+        (shotEvery && frame % shotEvery == 0)) {
         const UINT w = m_presentParams.BackBufferWidth ? m_presentParams.BackBufferWidth : 640;
         const UINT h = m_presentParams.BackBufferHeight ? m_presentParams.BackBufferHeight : 480;
         std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4, 0);

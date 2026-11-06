@@ -557,6 +557,35 @@ int main(int argc, char** argv) {
         }
         auto frameStart = std::chrono::steady_clock::now();
 
+        // NFSU2_SKIP_INTRO=1: while an intro movie plays (the game has a .vp6 file open: EA logo, THX, PSA, the
+        // opening FMV) tap Enter/Space/Esc and the pad's A/B every 10 frames, so the intro is over as soon as the
+        // game lets it be skipped. Stops by itself when the movie closes: the main menu is not touched.
+        {
+            static const bool skipIntro = std::getenv("NFSU2_SKIP_INTRO") && std::atoi(std::getenv("NFSU2_SKIP_INTRO")) != 0;
+            static bool skipping = false;
+            if (skipIntro && !config.autoAdvance && !std::getenv("NFSU2_KEY_SCRIPT")) {
+                const uint32_t fr = getD3D9PresentCount();
+                if (guestMoviesOpen() > 0) {
+                    skipping = true;
+                    if ((fr % 10) == 0) {
+                        setGuestKey(0x1c, true); setGuestKey(0x39, true); setGuestKey(0x01, true);
+                        g_pad.buttons = (1 << 0) | (1 << 1);
+                        syncPadToGuest();
+                    } else if ((fr % 10) == 5) {
+                        setGuestKey(0x1c, false); setGuestKey(0x39, false); setGuestKey(0x01, false);
+                        g_pad.buttons = 0;
+                        syncPadToGuest();
+                    }
+                } else if (skipping) {
+                    setGuestKey(0x1c, false); setGuestKey(0x39, false); setGuestKey(0x01, false);
+                    g_pad.buttons = 0;
+                    syncPadToGuest();
+                    skipping = false;
+                    std::printf("[NFSU2] intro skip: movie closed at frame %u\n", fr);
+                }
+            }
+        }
+
         // NFSU2_KEY_SCRIPT="start;frame:key[:frames],..." (smoke tests): from frame `start` on, the automatic menu
         // navigation stops and only these key taps reach the game (key: enter esc up down left right space tab,
         // or a hex DIK scan code; held for `frames`, default 4).
@@ -598,14 +627,35 @@ int main(int argc, char** argv) {
             // Profile name: erase the default "NOMBRE" and type "R36s" (Shift+R tests capitals through
             // TranslateMessage; the field holds 7 characters).
             struct ScriptKey { unsigned frame, scan; bool down; };
-            static const ScriptKey kNameScript[] = {
-                {1590, 0x0e, true}, {1594, 0x0e, false}, {1598, 0x0e, true}, {1602, 0x0e, false},
-                {1606, 0x0e, true}, {1610, 0x0e, false}, {1614, 0x0e, true}, {1618, 0x0e, false},
-                {1622, 0x0e, true}, {1626, 0x0e, false}, {1630, 0x0e, true}, {1634, 0x0e, false},
-                {1640, 0x2a, true}, {1643, 0x13, true}, {1651, 0x13, false}, {1654, 0x2a, false},
-                {1660, 0x04, true}, {1668, 0x04, false}, {1672, 0x07, true}, {1680, 0x07, false},
-                {1684, 0x1f, true}, {1692, 0x1f, false},
-            };
+            // NFSU2_PROFILE_NAME (default "R36s", at most 7 letters/digits/spaces) is what the first-run profile
+            // dialog gets typed: 8 backspaces over the default name, then each character (Shift for capitals).
+            static const std::vector<ScriptKey> kNameScript = [] {
+                static const char kRow[] = "qwertyuiop", kRow2[] = "asdfghjkl", kRow3[] = "zxcvbnm";
+                static const unsigned kDigit[] = {0x0b, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a};
+                std::vector<ScriptKey> v;
+                unsigned f = 1590;
+                for (int i = 0; i < 8; ++i, f += 8) { v.push_back({f, 0x0e, true}); v.push_back({f + 4, 0x0e, false}); }
+                std::string name = "R36s";
+                if (const char* n = std::getenv("NFSU2_PROFILE_NAME")) if (n[0]) name = n;
+                if (name.size() > 7) name.resize(7);
+                f = 1660;
+                for (char ch : name) {
+                    const bool upper = ch >= 'A' && ch <= 'Z';
+                    const char lc = upper ? static_cast<char>(ch - 'A' + 'a') : ch;
+                    unsigned scan = 0;
+                    if (lc == ' ') scan = 0x39;
+                    else if (lc >= '0' && lc <= '9') scan = kDigit[lc - '0'];
+                    else if (const char* p = std::strchr(kRow, lc); p && lc) scan = 0x10 + static_cast<unsigned>(p - kRow);
+                    else if (const char* p2 = std::strchr(kRow2, lc); p2 && lc) scan = 0x1e + static_cast<unsigned>(p2 - kRow2);
+                    else if (const char* p3 = std::strchr(kRow3, lc); p3 && lc) scan = 0x2c + static_cast<unsigned>(p3 - kRow3);
+                    if (!scan) continue;
+                    if (upper) v.push_back({f - 2, 0x2a, true});
+                    v.push_back({f, scan, true}); v.push_back({f + 5, scan, false});
+                    if (upper) v.push_back({f + 7, 0x2a, false});
+                    f += 10;
+                }
+                return v;
+            }();
             uint32_t frames = getD3D9PresentCount();
             for (const ScriptKey& k : kNameScript) if (frames == k.frame) setGuestKey(k.scan, k.down);
             if (frames >= 30 && frames < 1100) {

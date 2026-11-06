@@ -27,3 +27,6 @@ void typeGuestText(const std::vector<uint32_t>& characters);
 void setGuestLanguage(const char* language);
 void setGuestResolution(unsigned width,unsigned height);
 void setGuestFrameLimit(unsigned framesPerSecond);
+
+/** Number of FMV (.vp6) files the game has open right now (0 when no movie plays). */
+int guestMoviesOpen();

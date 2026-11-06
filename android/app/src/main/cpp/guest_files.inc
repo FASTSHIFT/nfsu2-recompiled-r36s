@@ -9,7 +9,27 @@ uint32_t fileError(){switch(errno){case ENOENT:return 2;case EACCES:case EPERM:r
 std::mutex resolvedGamePathsMutex;
 std::unordered_map<std::string,std::filesystem::path> resolvedGamePaths;
 void forgetResolvedGamePaths(){std::lock_guard<std::mutex> lock(resolvedGamePathsMutex);resolvedGamePaths.clear();}
+// The guest passes names in its ANSI code page (Big5 on the Traditional Chinese game: a profile name typed with the
+// on-screen keyboard over the default name is raw bytes, even half a character). The SD card's exFAT/FAT refuses
+// names that are not valid UTF-8, which stopped the whole game when it created the profile folder. Bytes >= 0x80
+// are kept on the card as %XX (upper-case hex) and turned back when the game lists a folder. Idempotent: the
+// result holds no byte >= 0x80, so encoding a name read back from the card changes nothing.
+std::string hostNameFromGuest(const std::string& name){
+    std::string out;out.reserve(name.size());static const char hex[]="0123456789ABCDEF";
+    for(unsigned char c:name){if(c<0x80)out.push_back(char(c));else{out.push_back('%');out.push_back(hex[c>>4]);out.push_back(hex[c&15]);}}
+    return out;
+}
+std::string guestNameFromHost(const std::string& name){
+    std::string out;out.reserve(name.size());
+    auto digit=[](char c)->int{return c>='0'&&c<='9'?c-'0':c>='A'&&c<='F'?c-'A'+10:-1;};
+    for(size_t i=0;i<name.size();++i){
+        if(name[i]=='%'&&i+2<name.size()+0&&digit(name[i+1])>=8&&digit(name[i+2])>=0){out.push_back(char(digit(name[i+1])*16+digit(name[i+2])));i+=2;}
+        else out.push_back(name[i]);
+    }
+    return out;
+}
 std::filesystem::path gamePath(std::string guest){
+    guest=hostNameFromGuest(guest);
     std::replace(guest.begin(),guest.end(),'\\','/');auto normalized=lower(guest);
     if(normalized=="c:/nfsu2")guest.clear();
     else if(normalized.rfind("c:/nfsu2/",0)==0)guest=guest.substr(9);
@@ -23,12 +43,16 @@ std::filesystem::path gamePath(std::string guest){
         for(auto& entry:std::filesystem::directory_iterator(result,error))if(lower(entry.path().filename().string())==lower(part.string())){result=entry.path();found=true;break;}
         if(!found){result/=part;everyPartExists=false;}
     }
-    auto root=std::filesystem::weakly_canonical(hostGameRoot);auto resolved=std::filesystem::weakly_canonical(result);
+    std::error_code canonicalError;auto root=std::filesystem::weakly_canonical(hostGameRoot,canonicalError);auto resolved=std::filesystem::weakly_canonical(result,canonicalError);if(canonicalError)resolved=result.lexically_normal();
     auto check=resolved.lexically_relative(root);for(const auto& part:check)if(part=="..")throw GuestStop("Guest symlink leaves data root");
     if(everyPartExists){std::lock_guard<std::mutex> lock(resolvedGamePathsMutex);resolvedGamePaths.emplace(cacheKey,resolved);}
     return resolved;
 }
 std::map<uint32_t,int> fileHandles;uint32_t nextFileHandle=0xf0060000;
+// FMV (.vp6) files currently open: the intro-skip helper of the R36S host mashes the confirm keys while a movie
+// plays (NFSU2_SKIP_INTRO). Counted per handle; the game opens each movie three times.
+std::set<uint32_t> movieHandles;std::atomic<int> movieOpenCount{0};
+extern "C" uint32_t getD3D9PresentCount();
 // The game skips its CD-drive check when the game folder holds a file named
 // "foobar" (its developer switch, 0x0057CAC0("foobar")). Copies made without
 // it showed the insert-disc MessageBoxA. Present it as an empty file when absent.
@@ -37,7 +61,7 @@ bool discCheckSwitch(const std::filesystem::path& path){
     return lower(path.filename().string())=="foobar"&&!std::filesystem::exists(path,error)&&
         std::filesystem::weakly_canonical(path.parent_path())==std::filesystem::weakly_canonical(hostGameRoot);
 }
-bool closeGuestFile(uint32_t handle){auto file=fileHandles.find(handle);if(file==fileHandles.end())return false;::close(file->second);fileHandles.erase(file);return true;}
+bool closeGuestFile(uint32_t handle){auto file=fileHandles.find(handle);if(file==fileHandles.end())return false;::close(file->second);fileHandles.erase(file);if(movieHandles.erase(handle)){movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie handle closed (%zu open) at frame %u",movieHandles.size(),getD3D9PresentCount());}return true;}
 void fileType(){
     uint32_t handle=arg(0);
     if(handle>=0xf0000200u&&handle<=0xf0000208u){ret(2,1);return;}
@@ -55,10 +79,21 @@ void createFile(){
     if(flags&0x40000000u)throw GuestStop("Overlapped CreateFile requires asynchronous file service");
     int options=access&0x40000000u?(access&0x80000000u?O_RDWR:O_WRONLY):O_RDONLY;
     switch(disposition){case 1:options|=O_CREAT|O_EXCL;break;case 2:options|=O_CREAT|O_TRUNC;break;case 3:break;case 4:options|=O_CREAT;break;case 5:options|=O_TRUNC;break;default:lastError=87;ret(UINT32_MAX,7);return;}
-    bool existed=std::filesystem::exists(path);
+    std::error_code existsError;bool existed=std::filesystem::exists(path,existsError);
+    // NFSU2_SKIP_MOVIES=ealogo,thx_logo,psa,fmvopening: those movies "do not exist" for the game (comma list of file
+    // stems, case-insensitive), so it goes on to the next screen at once. Only read-opens of .vp6 files are refused.
+    if(disposition==3&&!(access&0x40000000u)&&lower(path.extension().string())==".vp6"){
+        static const std::string skipList=[]{const char* e=std::getenv("NFSU2_SKIP_MOVIES");return std::string(e?e:"");}();
+        if(!skipList.empty()){
+            const std::string stem=lower(path.stem().string());size_t pos=0;
+            while(pos<=skipList.size()){size_t end=skipList.find(',',pos);if(end==std::string::npos)end=skipList.size();
+                if(lower(skipList.substr(pos,end-pos))==stem){NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie %s skipped (NFSU2_SKIP_MOVIES)",path.filename().string().c_str());lastError=2;ret(UINT32_MAX,7);return;}
+                pos=end+1;}
+        }
+    }
     int descriptor=disposition==3&&!(access&0x40000000u)&&discCheckSwitch(path) ? ::open("/dev/null",O_RDONLY|O_CLOEXEC) : ::open(path.c_str(),options|O_CLOEXEC,0600);
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest file %s access=%x disposition=%u",path.filename().string().c_str(),access,disposition);
-    if(descriptor<0){lastError=fileError();ret(UINT32_MAX,7);return;}uint32_t handle=nextFileHandle++;fileHandles.emplace(handle,descriptor);lastError=(disposition==2||disposition==4)&&existed?183:0;ret(handle,7);
+    if(descriptor<0){lastError=fileError();ret(UINT32_MAX,7);return;}uint32_t handle=nextFileHandle++;fileHandles.emplace(handle,descriptor);if(lower(path.extension().string())==".vp6"){movieHandles.insert(handle);movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie %s opened (%zu open) at frame %u",path.filename().string().c_str(),movieHandles.size(),getD3D9PresentCount());}lastError=(disposition==2||disposition==4)&&existed?183:0;ret(handle,7);
 }
 void readFile(){
     auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,5);return;}if(arg(4))throw GuestStop("Overlapped ReadFile pending");
@@ -120,7 +155,7 @@ bool filePatternMatches(std::string pattern,std::string name){
 bool writeFindData(uint32_t out,const std::filesystem::path& path){
     if(!out||!memory->writable(out,320)){lastError=87;return false;}
     struct stat status{};if(::stat(path.c_str(),&status)){lastError=fileError();return false;}
-    auto name=path.filename().string();if(name.size()>=260){lastError=206;return false;}
+    auto name=guestNameFromHost(path.filename().string());if(name.size()>=260){lastError=206;return false;}
     std::memset(ptr(out,320),0,320);write32(out,S_ISDIR(status.st_mode)?0x10:0x20);
     auto time=[&](uint32_t offset,int64_t seconds){uint64_t ticks=(seconds+11644473600ll)*10000000ull;std::memcpy(ptr(out+offset,8),&ticks,8);};
     time(4,status.st_ctime);time(12,status.st_atime);time(20,status.st_mtime);
@@ -130,7 +165,7 @@ bool writeFindData(uint32_t out,const std::filesystem::path& path){
 void findFirstFile(){
     auto requested=guestString(arg(0));std::replace(requested.begin(),requested.end(),'\\','/');
     if(requested.empty()||requested.back()=='/'){lastError=123;ret(UINT32_MAX,2);return;}
-    auto separator=requested.find_last_of('/');auto pattern=requested.substr(separator==std::string::npos?0:separator+1);
+    auto separator=requested.find_last_of('/');auto pattern=hostNameFromGuest(requested.substr(separator==std::string::npos?0:separator+1));
     auto directory=gamePath(separator==std::string::npos?".":requested.substr(0,separator));
     std::error_code error;GuestFileSearch search;
     if(std::filesystem::is_directory(directory,error))for(const char* dot:{".",".."})if(filePatternMatches(pattern,dot))search.paths.push_back(directory/dot);
