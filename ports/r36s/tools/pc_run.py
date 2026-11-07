@@ -2,8 +2,7 @@
 """On-device test driver for the PC port (nfsu2.aarch64.v12).
 Presses A in EmulationStation (cursor must be on NFSU2), samples the game, then quits it with Select+Start.
 Refuses to start while a game is already running. Restores nfsu2.cfg when done.
-usage: python3 pc_run.py --secs N [--drive [--nwin 2] [--load-timeout 120]] [--cfg 'LINE' ...] [--until-log TEXT] [--noquit]
---cfg lines are appended to nfsu2.cfg for this run only (use 'export VAR=value' for variables the launcher does not export).
+usage: python3 pc_run.py --secs N [--cfg 'LINE' ...] [--shots N] [--until-log TEXT] [--noquit]
 Output: /tmp/pcrun.out (events), /tmp/pcrun.tsv (samples)"""
 import argparse, os, re, subprocess, sys, time
 import evdev
@@ -15,6 +14,9 @@ ES_LOG = "/home/ark/.emulationstation/es_log.txt"
 OUT, TSV = "/tmp/pcrun.out", "/tmp/pcrun.tsv"
 EVDEV = "/dev/input/event2"
 BTN_A, BTN_B, BTN_SELECT, BTN_START = 305, 304, 704, 705
+# evdev codes of the R36S pad; SDL/vkbd names: 'WEST' (printed Y, left) = 307 = backspace in the on-screen keyboard,
+# 'NORTH' (printed X, top) = 308 = shift there.
+PAD = {'A': 305, 'B': 304, 'WEST': 307, 'NORTH': 308, 'L1': 310, 'R1': 311, 'L2': 312, 'R2': 313, 'UP': 544, 'DOWN': 545, 'LEFT': 546, 'RIGHT': 547, 'SELECT': 704, 'START': 705, 'R3': 707, 'L3': 706}
 COMM = "nfsu2.aarch64.v"          # comm is cut to 15 characters
 
 def sh(c):
@@ -31,6 +33,15 @@ def pid():
 def last_frame():
     m = sh("grep -a 'Guest D3D9 frame=' %s | tail -1 | sed 's/.*frame=\\([0-9]*\\).*/\\1/'" % LOG)
     return m
+
+def shot_frame():
+    try:
+        with open(LOG, 'rb') as f:
+            f.seek(0, 2); n = f.tell(); f.seek(max(0, n - 6000)); t = f.read().decode('latin1')
+        m = re.findall(r'diag_frame_(\d+)\.ppm', t)
+        return int(m[-1]) if m else 0
+    except OSError:
+        return 0
 
 def tap(codes, hold=0.2):
     d = evdev.InputDevice(EVDEV)
@@ -63,6 +74,8 @@ ap.add_argument("--load-timeout", dest="load_timeout", type=int, default=120, he
 ap.add_argument("--nwin", type=int, default=2, help="with --drive: PERF windows (120 frames each) to average once loading has settled")
 ap.add_argument("--settle", type=int, default=10, help="with --drive: seconds after the track stream opens before measuring (countdown, start)")
 ap.add_argument("--window", type=int, default=12, help="with --drive: seconds to measure after the first busy race frame")
+ap.add_argument("--tap-every", dest="tap_every", type=float, default=0, help="tap B every N seconds (menu exploration, no race logic)")
+ap.add_argument("--seq", default="", help="timed pad taps, seconds since the game started: '14:B,16:RIGHT,18:RIGHT' (A B WEST NORTH UP DOWN LEFT RIGHT START SELECT L1 R1 L3 R3)")
 ap.add_argument("--drive", action="store_true", help="tap B (confirm) until the race loads, then hold B (accelerate)")
 a = ap.parse_args()
 
@@ -89,10 +102,25 @@ try:
     last = sh("grep -A1 'Attempting to launch game' %s | tail -2 | tr '\\n' ' '" % ES_LOG)
     say("game pid %s; ES: %s" % (p, last[:150]))
     t0 = time.time(); prev = cpu_ticks(p); prevt = t0; hz = os.sysconf("SC_CLK_TCK")
+    seq = []          # [(anchor_frame or None, offset_seconds, key)]
+    for x in a.seq.split(','):
+        if not x.strip(): continue
+        when, key = x.split(':')
+        mm = re.match(r"F(\d+)\+([\d.]+)$", when)
+        seq.append((int(mm.group(1)), float(mm.group(2)), key.upper()) if mm else (None, float(when), key.upper()))
+    anchors = {}
     race_at = None; ingame_at = None; held = False; tick = 0; meas_at = None
     TICK = 0.25
     while time.time() - t0 < a.secs:
         time.sleep(TICK); tick += 1
+        if seq:
+            fr = shot_frame() if any(e[0] for e in seq) else 0
+            for f in {e[0] for e in seq if e[0]}:
+                if f not in anchors and fr >= f: anchors[f] = time.time(); say("anchor: present frame >= %d" % f)
+            due = [e for e in seq if (e[0] is None and time.time() - t0 >= e[1]) or (e[0] is not None and e[0] in anchors and time.time() - anchors[e[0]] >= e[1])]
+            for e in due:
+                seq.remove(e); tap([PAD[e[2]]], 0.15); say("seq: %s (F%s+%.1f) at t=%.0fs" % (e[2], e[0], e[1], time.time() - t0))
+        if a.tap_every and not a.drive and tick % max(1, int(a.tap_every / TICK)) == 0 and tick > 4 / TICK: tap([BTN_B], 0.12)
         if a.drive and os.path.exists("/proc/%s" % p):
             lg = open(LOG, errors="replace").read() if tick % 4 == 0 else ""
             # Loading time varies a lot (cold SD card: minutes). The race assets are loaded last: the track stream
