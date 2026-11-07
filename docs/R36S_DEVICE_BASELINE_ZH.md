@@ -9,7 +9,8 @@
 
 - 从源码构建（Docker）并部署成功，真机可以进菜单、建存档、进比赛、开车。
 - 默认画质（`performance`，30 fps 封顶，640×480）下，比赛起跑段约 **27.8 fps**。整局（约 5000 帧）中位数 29.2 fps，最差窗口 26.9 fps。
-- 瓶颈在 **game 线程的 CPU**（约 26 到 32 ms/帧）。呈现线程（presenter）已经够用：render 线程等空闲 buffer 的时间是 0.0 ms/帧，所以**现在加第三个 buffer 没有收益**。
+- 呈现线程（presenter）已经够用：render 线程等空闲 buffer 的时间是 0.0 ms/帧，所以**现在加第三个 buffer 没有收益**。
+- 瓶颈**不能直接说成 game 线程 CPU 吃满**：外部测量见 §8.4，game 线程只占单核约 70% 到 80%，整机 4 核只用了约 2.2 核。帧时间里有一部分既不是 CPU 也没有被游戏自己的计数器解释，原因未定。
 - 遇到并修复了两个会让游戏整体退出的问题：缺少 `SDATA/sdat.viv` 导致的 `strlen` 崩溃，以及非 UTF-8 存档目录名导致的 `std::filesystem` 异常。
 - 加了片头跳过开关和一套真机自动测试脚本，从启动到取得基线约 60 秒。
 - 偶发加载卡死一次，根因未知（见 §9）。
@@ -81,6 +82,28 @@ R36S 没有键盘。端口自带屏幕键盘，**按 R3（右摇杆按下）弹�
 
 `nfsu2.cfg` 里 `NFSU2_LANG="Chinese (Traditional)"` 经启动脚本里 `$LANG_ARG` 不加引号展开，被拆成 `--lang=Chinese` 和 `(Traditional)`，实际回退成西班牙语。已改成 `"$LANG_ARG"`。设备上的 `NFSU2.sh` 同步改了（原文件备份为 `NFSU2.sh.orig`）。仓库里的 `ports/r36s/package/NFSU2.sh` 也已改成带引号。
 
+### 5.4 画质选项重启后丢失：注册表只在内存里
+
+游戏把 `g_*` 画质选项和 `NotFirstTime` 等写进注册表（`RegSetValueExA`），而端口的注册表只活在一次运行里；每次启动再由启动脚本的 `NFSU2_GRAPHICS` 预设重新灌入。所以在游戏里改的选项，重启就回到预设。
+
+修复：游戏写入的 DWORD 值保存到 `NFSU2_REGISTRY_FILE`（启动脚本指向 `ports/nfsu2/registry.cfg`，`name=value` 每行一项），下次启动读回来，优先于预设。已在真机验证：把 `g_crowdenable` 改成 1、`g_texturefiltering` 改成 2 后启动，游戏读到的就是这两个值。日志里每次写入都有一行 `Registry set …`。
+
+注意：游戏**每次启动都会把全部 g_* 选项重写一遍**，所以第一次启动后文件就是满的；之后 `NFSU2_GRAPHICS` 预设不再生效。想回到预设，删掉 `registry.cfg`。
+
+### 5.5 新建存档的陷阱和用手柄输入名字
+
+- **名字输入框里有一段看不见的默认文字**（中文版 3 个字节，屏幕上不显示）。不先删掉，存档名就是"默认文字 + 你输的字"：先前存档文件夹 `%D6%8B%89V` 就是这么来的，界面上显示成"名稱V"。
+- **屏幕键盘（R3 弹出）：** 光标起点是 Q，大写默认开启；B 输入，R36S 上印着 Y 的键（evdev 307）是退格，印着 X 的键（308）是切换大小写，Start 回车并关闭。方向键会环绕，上下移动按键中心对齐。
+- **自动输入：** `pc_run.py` 的 `--seq` 支持以帧为锚点的按键（例如 `F900+1.5:B`，需要 `NFSU2_SHOT_EVERY` 才能读到当前帧）。流程：标题画面（约帧 900）按 B；"要建立新设定档吗"默认高亮"否"，要先按左再按 B；名字页开键盘，退格 8 次，再按路径输入字母，Start 确认。用这个流程输入 `VIFEX` 得到的名字是干净的。
+- 要触发新建提示，需要 `NotFirstTime=0`（`NFSU2_REGISTRY_EXTRA`），而且 `registry.cfg` 里不能已经有 `notfirsttime=1`，否则持久化的值会盖过它。
+- 一个没解释的现象：走完新建流程、确认之后，游戏**没有立刻写存档文件**（目录里是空的，日志里没有写入）。而用户平时玩的设备上，存档文件在一局之后被改写过，说明游戏会自动存档，但触发时机没查清。
+
+### 5.6 改存档名字
+
+存档文件里的名字字段只出现一次（偏移 `0xD225`）。把它改成新名字，再把文件夹和文件名都改成同一个名字就行。存档头里有一个 12 字节的校验值，没有找到算法，但**游戏加载时不检查它**：改名后的 `VIFEX/VIFEX` 在真机上正常读取，显示 "Load complete"，主菜单显示 VIFEX。只改过这 5 个字节，其余内容不变。
+
+**PC 与 Xbox 存档用的是同一个容器格式。** 两者都是 `20CM`（"MC02"）开头，头部之后是 16 字节一项的条目表，前几项的内容完全相同；差别在头部（PC 32 字节，含一个 12 字节校验；Xbox 80 字节）和总大小（PC 54,966，Xbox 53,868）。这说明 Xbox 存档转换到 PC 有可能做到，但校验值怎么算、多出来的 1.1 KB 是什么还没查。
+
 ## 6. 片头跳过
 
 开场顺序：`blank.vp6 → ealogo.vp6 → THX_logo.vp6 → PSA.vp6 → FMVOpening.vp6`。游戏对每个视频先"开一次再关"探测存在两次，再打开第三次真正播放。
@@ -95,9 +118,9 @@ R36S 没有键盘。端口自带屏幕键盘，**按 R3（右摇杆按下）弹�
 
 另外在 `guest_files.inc` 里加了 `.vp6` 句柄计数（`guestMoviesOpen()`），日志里会出现 `Guest movie … opened/closed at frame N`。
 
-## 7. Xbox 存档兼容性（未验证）
+## 7. Xbox 存档兼容性（未验证，但容器相同）
 
-Xbox 版存档在 `UDATA/4541005a/000000000056/`，主文件 `V` 大小 53,868 字节，文件头 `20CM`（即 "MC02" 的小端写法），之后是看起来经过压缩或加密的数据块。PC 版存档（54,966 字节）还没有逐字节对比过。两边都是 x86、同一套引擎，内部结构可能相近，但外层容器、校验和和字段版本很可能不同。结论：**是否可转换要先对比两份存档，现在不能保证**。
+Xbox 版存档在 `UDATA/4541005a/000000000056/`，主文件 `V` 大小 53,868 字节。PC 版存档（54,966 字节）与它是同一个 `20CM` 容器，条目表前几项逐项相同（见 §5.6）。没有做过实际转换，不能保证；要做的话先要弄清头部那段校验值的算法和 PC 多出来的内容。
 
 ## 8. 自动测试与基线
 
@@ -153,7 +176,51 @@ python3 /tmp/pc_run.py --secs 300 --drive --nwin 2 \
 
 端口已有 presenter 线程加 2 个离屏 buffer（`NFSU2_PRESENT_SLOTS`，最大 3）。比赛中的 `[NFSU2 PRESENT]` 统计：render 线程等空闲 buffer 0.0 ms/帧，presenter 等 GPU 12.9 到 19.2 ms，blit+swap 1.8 ms；`[NFSU2 WAIT]` 里 render 线程每帧空闲 9 到 10 ms，game 线程的帧率封顶等待只有 0.7 到 1.2 ms。
 
-第三个 buffer 没有东西可填，因此预计没有收益，瓶颈是 game 线程的 CPU。`NFSU2_PRESENT_SLOTS=3` 没有做过 A/B，只是推断。
+第三个 buffer 没有东西可填，因此预计没有收益。`NFSU2_PRESENT_SLOTS=3` 没有做过 A/B，只是推断。
+
+### 8.3.1 `NFSU2_PRESENT_SLOTS` 2 对 3 的 A/B（真机）
+
+`ports/r36s/tools/ab_pc.sh 3 "slots2|export NFSU2_PRESENT_SLOTS=2" "slots3|export NFSU2_PRESENT_SLOTS=3"`：交替各跑 3 轮，每轮是同一条自动流程（Quick Race，起跑后取加载稳定后的 3 个 PERF 窗口）。
+
+| 配置 | 每轮 fps | 平均 fps | wall ms | game 线程 ms | GL 驱动 ms | draw 数 | render 线程等空闲 buffer（ms/帧） |
+|---|---|---|---|---|---|---|---|
+| 2 个 buffer | 27.3、26.5、29.8 | 27.9 | 36.3 | 20.1 | 13.2 | 498 | 0.4、0.1、0.4 |
+| 3 个 buffer | 27.9、28.1、27.7 | 27.9 | 36.0 | 20.6 | 13.5 | 508 | 0.0、0.0、0.0 |
+
+结论：**帧率没有差别**（都是 27.9 fps）。第三个 buffer 只把 render 线程等 buffer 的时间从 0.1 到 0.4 ms 降到 0，约占帧时间的 1%，在测量噪声之内。2 个 buffer 的三轮之间就差 3.3 fps，原因是三轮取到的画面位置不同（draw 数 403 到 550），不是配置。每组只有 3 轮，能分辨的差异大约在 2 fps 以上。
+
+因此 reVC 三缓冲那套方案（它解决的是 `eglSwapBuffers` 阻塞主渲染线程）在这个端口上没有可挖的空间：这个端口的 swap 已经在独立的 presenter 线程里。
+
+### 8.4 CPU 统计可信吗（外部探针复测）
+
+用 `ports/r36s/tools/cpu_probe.py` 从游戏进程外面每秒采样（比赛巡航段，27 秒）。结果：
+
+| 项目 | 外部测量 | 游戏自己的计数 |
+|---|---|---|
+| game 线程 | 单核 80.2%（jiffies，约 27 ms/帧） | 22.8 到 24.6 ms/帧（`CLOCK_THREAD_CPUTIME_ID`，约 70%） |
+| render 线程 | 68.8% | 约 19 到 27 ms/帧 |
+| 其它（g8 声音线程、音频、驱动） | 14%、4%、3.5% | |
+| 进程合计 | 1.81 核 | |
+| 整机 4 核忙碌度 | cpu0 26%，cpu1 60%，cpu2 68%，cpu3 61%；iowait 0% | |
+| 频率、温度 | 全部核 1.296 GHz（`scaling_max_freq` 就是 1.296 GHz，硬件上限 1.512 GHz），温度 54 到 59 ℃ | |
+
+结论：
+
+1. **CPU 没有吃满。** game 线程大约 70% 到 80% 的单核，整机只忙了约 2.2 核。巡航段（帧 6960 到 7920）帧率是 29.4 到 29.9 fps，已经贴着 30 fps 封顶：游戏自己的计数显示每帧帧率封顶等待约 4.5 ms。也就是说这一段是被封顶限制，而不是被 CPU 限制。
+2. **两种口径差 3 到 4 ms/帧。** 游戏日志里 `game-thread CPU` 用线程 CPU 时钟（精确，但只数这一个线程在核上运行的时间）；日志里的线程表和我的探针用 `/proc` 的 jiffies（10 ms 节拍统计，偏高）。这两个数不能混用，原因没有进一步查。
+3. **swap 和 IO 不在 CPU 数里，但这段里它们可以忽略。** 采样窗口内 `pswpin` 为 0 到 13 页，`pgmajfault` 3 到 47 次，iowait 0%，游戏日志里 major faults 为 0.00/帧。后台 kswapd 写出了约 3 到 5 MB，没有读回。可用内存仍只有 160 到 175 MB，进程 RSS 约 600 MB，所以内存压力存在，只是当时没有卡住游戏。更长的真实游玩里 swap 用到 90 到 110 MB（§8.2）。
+4. **日志里的 "run queue 0.0 ms/frame" 和 "CPU 0.0 (schedstat)" 是没有数据，不是 0。** 这台 4.4 内核没有 `/proc/<pid>/schedstat`，也没有 `wchan`、PSI。所以**无法测到线程在运行队列里等了多久**。
+5. **线程只在 cpu1 到 cpu3 上运行。** `main.cpp:507` 起把亲和性设成 1 到 3，cpu0 基本空着。三个核上有 game、render、声音线程、驱动线程、音频线程竞争，game 线程每秒被抢占（nonvoluntary 上下文切换）约 468 次，约 14 次/帧，render 线程约 232 次/秒。这是"核数不够时线程互相等待"的迹象，**但没有实测运行队列等待，只是推断**。
+6. 起跑格窗口（27.8 fps，36.1 ms/帧）里 game 线程 CPU 26.2 ms，加上日志里分类的等待也解释不了全部 36 ms，缺口约 7 ms。
+
+下一步该验证的假设：去掉亲和性限制（让 cpu0 参与）或降低同时运行的线程数，看起跑格帧率是否变化；用 `perf sched`（设备上有 perf）取运行队列延迟。
+
+另外，**时钟差异会影响和 Xbox 版的对比**：PC 版跑在 1.296 GHz；Xbox 启动脚本默认把上限设成 1.2096 GHz。
+
+### 8.5 虚拟鼠标和 LAN 主持
+
+- 掌机构建原先把游戏的鼠标指针藏在画面外，并报告"没有鼠标"，所以需要点击的界面（主持 LAN、错误框）按不了。现在 **Select + L3** 开关虚拟鼠标：右摇杆移动，R1 是左键，`NFSU2_MOUSE_SPEED` 调速度。真机验证：开启后能进入 LAN 主持界面并输入名称。
+- 点"主持"后游戏报"尝试启动 LAN 服务发生问题"。日志：`Guest LoadLibrary server.dll`，随后 `server.dll: this build has no lifted code for it`。LAN 主持需要 EA 的 `server.dll`，运行时有加载它的完整代码（`guest_modules.inc`，由 `NFS_SERVER_DLL` 控制），但 R36S 构建没有把它重编译进去。加入别人的 LAN 房间走 UDP 9999，客户端部分日志里是通的。
 
 ## 9. 已知问题
 
@@ -171,7 +238,10 @@ python3 /tmp/pc_run.py --secs 300 --drive --nwin 2 \
 | `ports/r36s/main.cpp` | `NFSU2_PROFILE_NAME`（`--auto-advance` 建档时输入的名字，默认 `R36s`）；`NFSU2_SKIP_INTRO` 按键连发备用方案 |
 | `ports/r36s/d3d9_gles/d3d9_gles.cpp` | `NFSU2_SHOT_EVERY=N`：每 N 帧保存一张 `diag_frame_<帧>.ppm` |
 | `ports/r36s/package/NFSU2.sh`、`nfsu2.cfg` | `NFSU2_SKIP_INTRO` 开关 |
-| `ports/r36s/tools/pc_run.py` | 真机自动测试脚本 |
+| `android/app/src/main/cpp/guest_kernel.inc`、`ports/r36s/package/NFSU2.sh` | 注册表持久化（`NFSU2_REGISTRY_FILE`） |
+| `guest_files.inc` | 文件操作日志（Find、CreateDirectory、Delete、Move、写失败） |
+| `guest_window.inc`、`guest_runtime.{cpp,h}`、`main.cpp` | 虚拟鼠标（Select + L3） |
+| `ports/r36s/tools/pc_run.py`、`cpu_probe.py`、`ab_pc.sh` | 真机自动测试、CPU 探针、A/B 运行 |
 
 环境变量一览：
 
@@ -181,6 +251,8 @@ python3 /tmp/pc_run.py --secs 300 --drive --nwin 2 \
 | `NFSU2_SKIP_MOVIES=a,b` | 指定要"消失"的 `.vp6` 文件名主干 |
 | `NFSU2_SHOT_EVERY=N` | 每 N 帧截图 |
 | `NFSU2_PROFILE_NAME=V` | `--auto-advance` 建档用的名字，最长 7 个字符 |
+| `NFSU2_REGISTRY_FILE=path` | 保存游戏写入的注册表 DWORD 选项，启动脚本设为 `registry.cfg` |
+| `NFSU2_MOUSE_SPEED=1.0` | 虚拟鼠标速度倍率 |
 
 调试用启动脚本分支（只在设备上改过，没有进仓库）：`NFSU2_GDB=1` 在 gdb 下运行，`NFSU2_EXTRA_ARGS` 追加命令行参数，日志末尾写 `game exit code N`。
 
