@@ -81,8 +81,8 @@ void createEvent(){
     if(!event){event=std::make_shared<GuestEvent>(GuestEvent{arg(1)!=0,arg(2)!=0});if(!name.empty())namedEvents[name]=event;}
     uint32_t handle=nextEventHandle++;eventHandles.emplace(handle,event);ret(handle,4);
 }
-void setEvent(){auto event=eventHandles.find(arg(0));if(event==eventHandles.end()){lastError=6;ret(0,1);return;}event->second->signaled=true;notifyGuestSync();ret(1,1);}
-void resetEvent(){auto event=eventHandles.find(arg(0));if(event==eventHandles.end()){lastError=6;ret(0,1);return;}event->second->signaled=false;ret(1,1);}
+void setEvent(){auto event=eventHandles.find(arg(0));if(event==eventHandles.end()){lastError=6;ret(0,1);return;}event->second->signaled=true;noteEventSet(arg(0));notifyGuestSync();ret(1,1);}
+void resetEvent(){auto event=eventHandles.find(arg(0));if(event==eventHandles.end()){lastError=6;ret(0,1);return;}event->second->signaled=false;noteEventReset(arg(0));ret(1,1);}
 // ExitThread unwinds the lifted frames back to guestThreadEntry.
 struct GuestThreadExit{uint32_t code;};
 thread_local bool insideGuestThread=false;
@@ -111,7 +111,11 @@ void* guestThreadEntry(void* context){
     }catch(const GuestStop& error){
         thread.exitCode=1;
         if(!stopRequested){guestThreadFault=error.what();NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Guest thread %u: %s",thread.id,error.what());}
-    }catch(const std::exception& error){thread.exitCode=1;guestThreadFault=error.what();}
+    }catch(const std::exception& error){
+        // This used to be silent: a guest thread killed by a host exception (bad_alloc, out_of_range, ...) just vanished.
+        thread.exitCode=1;guestThreadFault=error.what();++threadExceptions;
+        NFS_RUNTIME_LOG(ANDROID_LOG_ERROR,"NFSU2","Guest thread %u (entry %08x) ended by host exception: %s (last function %08x, frame %u)",thread.id,thread.start,error.what(),g_cur_func,getD3D9PresentCount());
+    }
     heaps->free(GuestHeaps::process,thread.stack);heaps->free(GuestHeaps::process,thread.tib);
     {std::lock_guard<std::mutex> l(guestMutexState);
      for(auto& value:mutexHandles)if(value.second->owner==thread.id){__atomic_store_n(&value.second->owner,0u,__ATOMIC_RELEASE);value.second->depth=0;value.second->abandoned=true;}}
@@ -171,10 +175,12 @@ void waitThread(){
     auto waitStart=std::chrono::steady_clock::now();bool reported=false;
     struct WaitTimer{std::chrono::steady_clock::time_point t0=std::chrono::steady_clock::now();bool on=nfsIsGameThread();
         ~WaitTimer(){if(on)nfsWaitAdd(8,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-t0).count());}} waitTimer;
-    for(uint64_t gen=guestSyncGeneration.load();thread?!thread->done:!event->signaled;gen=guestSyncGeneration.load()){if(timeout!=UINT32_MAX&&std::chrono::steady_clock::now()>=deadline){ret(258,2);return;}
+    if(event)noteEventWait(handle,0);
+    for(uint64_t gen=guestSyncGeneration.load();thread?!thread->done:!event->signaled;gen=guestSyncGeneration.load()){if(timeout!=UINT32_MAX&&std::chrono::steady_clock::now()>=deadline){if(event)noteEventWait(handle,2);ret(258,2);return;}
         if(reportLongWaits&&!reported&&std::chrono::steady_clock::now()-waitStart>std::chrono::seconds(8)){reported=true;
             NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","LONG WAIT guest thread %u on %s %08x (manual=%d) timeout=%u",guestThreadId,thread?"thread":"event",handle,event?int(event->manual):-1,timeout);}
         checkGuestProgress();if(thread?!thread->done:!event->signaled)waitGuestSync(gen,timeout==0?0:4,[&]{return thread?thread->done:event->signaled;});}
+    if(event)noteEventWait(handle,1);
     if(event&&!event->manual)event->signaled=false;
     ret(0,2);
 }

@@ -1,5 +1,14 @@
 #include <set>
 #include <condition_variable>
+#if !defined(__ANDROID__)
+#include <execinfo.h>
+#endif
+#include <csignal>
+#include <dirent.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "guest_runtime.h"
 #include "android_resolution.h"
 #include "guest_memory.h"
@@ -185,6 +194,10 @@ public:
     }
     // True when another thread holds a ticket (is queued for the machine). Called by the owner.
     bool hasWaiters(){std::lock_guard<std::mutex> l(m_);return next_!=serving_+1;}
+    // Ticket counters for the state dump: next-serving is the number of threads holding or waiting for the machine.
+    void snapshot(uint64_t& next,uint64_t& serving,unsigned& depth,bool& owned){
+        std::lock_guard<std::mutex> l(m_);next=next_;serving=serving_;depth=depth_;owned=owner_!=std::thread::id{};
+    }
     bool try_lock(){
         const auto me=std::this_thread::get_id();
         std::lock_guard<std::mutex> l(m_);
@@ -273,12 +286,67 @@ struct WaitScope {
 };
 std::atomic<int64_t> lastPresentMs{0};
 int64_t steadyMs(){return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+// ---- State-dump diagnostics (guest_diag.inc) --------------------------------------------------------------
+// The loading hang leaves every host thread healthy, so the evidence is in guest state: which file the game
+// opened last, what each pool thread waits on, who holds which lock, what the heaps look like, and whether an
+// allocation failed. dumpGuestState() writes all of it to the log on a trigger file (dump.now next to
+// ports/nfsu2/) or when the game opens no file for a long time after a non-streaming file.
+// NFSU2_NO_DIAG=1 turns the triggers off; allocation failures and thread exceptions are always logged.
+struct FileOpenNote{int64_t ms=0;uint32_t frame=0,thread=0;int depth=0;void* frames[12]={};char name[48]={};};
+// Per event handle: how often it was set / reset / waited on, and who and when last. Handles are 0xf0040000 + n.
+struct SyncStat{
+    std::atomic<uint64_t> sets{0},resets{0},waits{0},wakes{0},timeouts{0};
+    std::atomic<int64_t> lastSetMs{0},lastResetMs{0},lastWaitMs{0},lastWakeMs{0};
+    std::atomic<uint32_t> lastSetThread{0},lastResetThread{0},lastWaitThread{0},lastWakeThread{0};
+};
+std::array<SyncStat,64> syncStats;
+SyncStat* syncStat(uint32_t handle){const uint32_t index=handle-0xf0040000u;return index<syncStats.size()?&syncStats[index]:nullptr;}
+struct ReadNote{int64_t ms=0;uint32_t asked=0,got=0;uint64_t reads=0,bytes=0;};
+std::mutex fileNotesMutex;
+std::array<FileOpenNote,48> fileNotes;
+uint64_t fileNoteCount=0;
+std::map<uint32_t,ReadNote> readNotes;       // by guest file handle; guarded by fileNotesMutex
+std::atomic<int64_t> lastFileOpenMs{0};
+std::atomic<uint64_t> allocFailures{0},threadExceptions{0};
+extern "C" uint32_t getD3D9PresentCount();
+// Event bookkeeping for the state dump. kind: 0 wait starts, 1 wait returned signalled, 2 wait timed out.
+void noteEventSet(uint32_t handle){if(auto* s=syncStat(handle)){++s->sets;s->lastSetMs=steadyMs();s->lastSetThread=guestThreadId;}}
+void noteEventReset(uint32_t handle){if(auto* s=syncStat(handle)){++s->resets;s->lastResetMs=steadyMs();s->lastResetThread=guestThreadId;}}
+void noteEventWait(uint32_t handle,int kind){
+    if(auto* s=syncStat(handle)){
+        const int64_t now=steadyMs();
+        if(kind==0){++s->waits;s->lastWaitMs=now;s->lastWaitThread=guestThreadId;}
+        else{if(kind==1)++s->wakes;else ++s->timeouts;s->lastWakeMs=now;s->lastWakeThread=guestThreadId;}
+    }
+}
+void noteFileOpen(const std::string& name){
+    FileOpenNote note;note.ms=steadyMs();note.frame=getD3D9PresentCount();note.thread=guestThreadId;std::snprintf(note.name,sizeof note.name,"%s",name.c_str());
+#if !defined(__ANDROID__)
+    // The lifted functions keep their sub_XXXXXXXX names (the build links with -rdynamic): the chain says which guest code is loading.
+    static const bool chains=std::getenv("NFSU2_NO_DIAG")==nullptr;
+    if(chains)note.depth=backtrace(note.frames,12);
+#endif
+    {std::lock_guard<std::mutex> l(fileNotesMutex);fileNotes[fileNoteCount++%fileNotes.size()]=note;}
+    lastFileOpenMs=note.ms;
+}
+void noteFileRead(uint32_t handle,uint32_t asked,ssize_t got){
+    std::lock_guard<std::mutex> l(fileNotesMutex);
+    auto& note=readNotes[handle];note.ms=steadyMs();note.asked=asked;note.got=got<0?0u:uint32_t(got);++note.reads;if(got>0)note.bytes+=uint64_t(got);
+}
+void noteFileClose(uint32_t handle){std::lock_guard<std::mutex> l(fileNotesMutex);readNotes.erase(handle);}
+std::string lastOpenedFile(){
+    std::lock_guard<std::mutex> l(fileNotesMutex);
+    return fileNoteCount?fileNotes[(fileNoteCount-1)%fileNotes.size()].name:std::string();
+}
+void dumpGuestState(const char* reason);
+void diagTick();
 void startStallWatch(){
     static std::once_flag started;
     std::call_once(started,[]{std::thread([]{
         int64_t reportedFor=0;
         while(!stopRequested.load()){
             std::this_thread::sleep_for(std::chrono::seconds(2));
+            diagTick();
             int64_t last=lastPresentMs.load(),idle=steadyMs()-last;
             if(guestPaused.load()||idle<12000||reportedFor==last)continue;
             reportedFor=last;
@@ -462,9 +530,32 @@ void moduleHandle() {
 void heapCreate() {
     ret(heaps->create(arg(0),arg(1),arg(2)),3);
 }
-void heapAlloc() { ret(heaps->alloc(arg(0),arg(1),arg(2)),3); }
+// A failed guest allocation returns NULL (or throws for HEAP_GENERATE_EXCEPTIONS); the game may not handle it and
+// then silently stops loading. Log the first 40 and every 200th, with what the heaps looked like.
+void noteAllocFailure(const char* what,uint32_t heap,uint32_t flags,uint32_t bytes,const char* how){
+    const uint64_t n=++allocFailures;
+    if(n>40&&n%200)return;
+    const auto s=heaps->stats();
+    NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Guest %s failed (%s) #%llu: heap %08x flags %x bytes %u from %08x at frame %u; heaps live %llu KB in %llu blocks, free %llu KB in %llu pieces, largest free %u KB",
+        what,how,static_cast<unsigned long long>(n),heap,flags,bytes,g_cur_func,getD3D9PresentCount(),
+        static_cast<unsigned long long>(s.live/1024),static_cast<unsigned long long>(s.blocks),static_cast<unsigned long long>(s.freeTotal/1024),
+        static_cast<unsigned long long>(s.freePieces),s.largestFree/1024);
+}
+void heapAlloc() {
+    uint32_t address=0;
+    try{address=heaps->alloc(arg(0),arg(1),arg(2));}
+    catch(const std::exception& error){noteAllocFailure("HeapAlloc",arg(0),arg(1),arg(2),error.what());throw;}
+    if(!address)noteAllocFailure("HeapAlloc",arg(0),arg(1),arg(2),"returned NULL");
+    ret(address,3);
+}
 void heapFree() { ret(heaps->free(arg(0),arg(2)),3); }
-void heapRealloc() { ret(heaps->realloc(arg(0),arg(1),arg(2),arg(3)),4); }
+void heapRealloc() {
+    uint32_t address=0;
+    try{address=heaps->realloc(arg(0),arg(1),arg(2),arg(3));}
+    catch(const std::exception& error){noteAllocFailure("HeapReAlloc",arg(0),arg(1),arg(3),error.what());throw;}
+    if(!address&&arg(3))noteAllocFailure("HeapReAlloc",arg(0),arg(1),arg(3),"returned NULL");
+    ret(address,4);
+}
 void heapSize() { ret(heaps->size(arg(0),arg(2)),3); }
 void heapDestroy() { ret(heaps->destroy(arg(0)),1); }
 void getProcessHeap() { ret(GuestHeaps::process,0); }
@@ -563,6 +654,7 @@ uint32_t callGuest(uint32_t va,const std::vector<uint32_t>& args,uint32_t cleanu
 #include "guest_input.inc"
 #include "guest_audio.inc"
 #include "guest_network.inc"
+#include "guest_diag.inc"
 void testGuestScheduling(){
     State original;original.save();uint32_t savedError=lastError,savedTLS=tlsValues[1087];
     g_eax=0x11223344;g_fs_base=0x21000000;g_st[0]=123.5;g_xmm[7].u64[0]=0x123456789abcdef0ull;

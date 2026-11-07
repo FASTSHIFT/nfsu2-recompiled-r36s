@@ -61,7 +61,7 @@ bool discCheckSwitch(const std::filesystem::path& path){
     return lower(path.filename().string())=="foobar"&&!std::filesystem::exists(path,error)&&
         std::filesystem::weakly_canonical(path.parent_path())==std::filesystem::weakly_canonical(hostGameRoot);
 }
-bool closeGuestFile(uint32_t handle){auto file=fileHandles.find(handle);if(file==fileHandles.end())return false;::close(file->second);fileHandles.erase(file);if(movieHandles.erase(handle)){movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie handle closed (%zu open) at frame %u",movieHandles.size(),getD3D9PresentCount());}return true;}
+bool closeGuestFile(uint32_t handle){auto file=fileHandles.find(handle);if(file==fileHandles.end())return false;::close(file->second);fileHandles.erase(file);noteFileClose(handle);if(movieHandles.erase(handle)){movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie handle closed (%zu open) at frame %u",movieHandles.size(),getD3D9PresentCount());}return true;}
 void fileType(){
     uint32_t handle=arg(0);
     if(handle>=0xf0000200u&&handle<=0xf0000208u){ret(2,1);return;}
@@ -93,6 +93,20 @@ void createFile(){
     }
     int descriptor=disposition==3&&!(access&0x40000000u)&&discCheckSwitch(path) ? ::open("/dev/null",O_RDONLY|O_CLOEXEC) : ::open(path.c_str(),options|O_CLOEXEC,0600);
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest file %s access=%x disposition=%u",path.filename().string().c_str(),access,disposition);
+    noteFileOpen(path.filename().string());
+    // A car folder missing from the game data: some regional installs lack CARS\CIVIC and CARS\RSX (others CORSA and
+    // PEUGOT106), yet the game picks any of them as an AI or traffic car. The texture load (sub_0063A820) never gets
+    // its callback when the file is missing, so the game sits on "Loading". Say so once per folder. Only CARS: the game
+    // also probes folders that never exist (NFSUNDER\ZDIR.BIN at start).
+    if(descriptor<0&&!(access&0x40000000u)&&errno==ENOENT){
+        std::error_code folderError;const auto folder=path.parent_path();
+        if(lower(folder.parent_path().filename().string())=="cars"&&!std::filesystem::exists(folder,folderError)){
+            static std::set<std::string> reported;
+            if(reported.size()<16&&reported.insert(lower(folder.filename().string())).second)
+                NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","MISSING GAME DATA: gamedata/CARS/%s does not exist (wanted %s). The game hangs on \"Loading\" when it picks this car: copy the folder from a complete NFSU2 PC install (README, Complete car data).",
+                    folder.filename().string().c_str(),path.filename().string().c_str());
+        }
+    }
     if(descriptor<0){if(access&0x40000000u)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest file %s could not be opened for writing: %s",path.string().c_str(),std::strerror(errno));lastError=fileError();ret(UINT32_MAX,7);return;}uint32_t handle=nextFileHandle++;fileHandles.emplace(handle,descriptor);if(lower(path.extension().string())==".vp6"){movieHandles.insert(handle);movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie %s opened (%zu open) at frame %u",path.filename().string().c_str(),movieHandles.size(),getD3D9PresentCount());}lastError=(disposition==2||disposition==4)&&existed?183:0;ret(handle,7);
 }
 void readFile(){
@@ -100,6 +114,7 @@ void readFile(){
     if(arg(3))write32(arg(3),0);ssize_t count;
     const auto readStart=std::chrono::steady_clock::now();
     do{count=::read(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
+    noteFileRead(arg(0),arg(2),count);
     if(nfsIsGameThread()){nfsWaitAdd(10,std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-readStart).count());if(count>0)nfsWaitAdd(11,uint64_t(count));}
     if(count<0){lastError=fileError();ret(0,5);return;}if(arg(3))write32(arg(3),count);ret(1,5);
 }

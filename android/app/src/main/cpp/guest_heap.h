@@ -71,6 +71,14 @@ public:
         auto b=h->second.blocks.find(address); if(b==h->second.blocks.end()) return false;
         release(address,b->second.capacity); h->second.live-=b->second.capacity; h->second.blocks.erase(b); return true;
     }
+    // Totals over every heap and the free list, for allocation-failure and state-dump diagnostics.
+    struct Stats { uint64_t live=0,blocks=0,freeTotal=0,freePieces=0; uint32_t largestFree=0; };
+    Stats stats() const {
+        Stats s;
+        for(const auto& h:heaps_){ s.live+=h.second.live; s.blocks+=h.second.blocks.size(); }
+        for(const auto& f:free_){ s.freeTotal+=f.second; ++s.freePieces; s.largestFree=std::max(s.largestFree,f.second); }
+        return s;
+    }
     uint32_t size(uint32_t heap,uint32_t address) const {
         auto h=heaps_.find(heap); if(h==heaps_.end()) return UINT32_MAX;
         auto b=h->second.blocks.find(address); return b==h->second.blocks.end()?UINT32_MAX:b->second.capacity;
