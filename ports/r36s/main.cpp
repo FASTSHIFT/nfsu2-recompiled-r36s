@@ -29,6 +29,10 @@ extern "C" int __llvm_profile_write_file(void) __attribute__((weak));  // clang 
 #endif
 
 #include <csignal>
+#include <fcntl.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 extern uint32_t g_nfsScreenRotation;  // d3d9_gles.cpp
@@ -298,6 +302,138 @@ static void signalHandler(int sig) {
     std::_Exit(0);
 }
 
+// -----------------------------------------------------------------------------
+// Crash report. A fatal signal (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT) leaves only "exit code 139" in the
+// launcher log otherwise. The handler writes the thread, the fault address, the registers, the stack words that
+// point into the executable and the memory mapping around the fault address to stderr (log.txt), then lets the
+// default action run so the exit code stays the same. Only write(2) and the stack are used. The binary is not
+// position independent and keeps its symbols: `nm -n nfsu2.aarch64.v12` turns the addresses into the lifted
+// functions (sub_XXXXXXXX is the guest address). The fault address minus the 4 GB guest region is the guest address.
+// -----------------------------------------------------------------------------
+extern "C" char __executable_start, etext;
+namespace crash {
+static char g_altStack[64 * 1024];
+static char g_maps[96 * 1024];
+static void put(const char* s) {
+    size_t n = std::strlen(s);
+    while (n) { ssize_t w = ::write(2, s, n); if (w <= 0) break; s += w; n -= static_cast<size_t>(w); }
+}
+static void hex(uint64_t v) {
+    char b[19]; b[0] = '0'; b[1] = 'x';
+    for (int i = 0; i < 16; ++i) b[2 + i] = "0123456789abcdef"[(v >> (60 - 4 * i)) & 15];
+    b[18] = 0; put(b);
+}
+static void dec(long v) {
+    char b[24]; int i = 23; b[i] = 0; bool neg = v < 0; unsigned long u = neg ? -static_cast<unsigned long>(v) : static_cast<unsigned long>(v);
+    do { b[--i] = static_cast<char>('0' + u % 10); u /= 10; } while (u);
+    if (neg) b[--i] = '-';
+    put(b + i);
+}
+static uint64_t parseHex(const char*& p) {
+    uint64_t v = 0;
+    for (;; ++p) {
+        char c = *p;
+        if (c >= '0' && c <= '9') v = v * 16 + static_cast<uint64_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') v = v * 16 + static_cast<uint64_t>(c - 'a' + 10);
+        else break;
+    }
+    return v;
+}
+static void handler(int sig, siginfo_t* info, void* context) {
+    const uint64_t fault = info ? reinterpret_cast<uint64_t>(info->si_addr) : 0;
+    put("\n[NFSU2 CRASH] signal "); dec(sig);
+    put(" code "); dec(info ? info->si_code : 0);
+    put(" fault address "); hex(fault);
+    char name[32] = {};
+    ::prctl(PR_GET_NAME, name);
+    put("\n[NFSU2 CRASH] thread '"); put(name); put("' tid "); dec(::syscall(SYS_gettid));
+    put(" pid "); dec(::getpid()); put("\n");
+    if (auto* uc = static_cast<ucontext_t*>(context)) {
+        struct Cpu { uint64_t pc, sp, lr, fp; const unsigned long long* x; int n; };
+#if defined(__aarch64__)
+        const auto& mc = uc->uc_mcontext;
+        const Cpu m{mc.pc, mc.sp, mc.regs[30], mc.regs[29], reinterpret_cast<const unsigned long long*>(mc.regs), 29};
+        const char* prefix = "x";
+#else   // x86-64 (PC builds): the general registers in ucontext order
+        const auto& g = uc->uc_mcontext.gregs;
+        static unsigned long long regs[16];
+        const int order[16] = {REG_RAX, REG_RBX, REG_RCX, REG_RDX, REG_RSI, REG_RDI, REG_RBP, REG_RSP, REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15};
+        for (int i = 0; i < 16; ++i) regs[i] = static_cast<unsigned long long>(g[order[i]]);
+        const Cpu m{static_cast<uint64_t>(g[REG_RIP]), static_cast<uint64_t>(g[REG_RSP]), 0, static_cast<uint64_t>(g[REG_RBP]), regs, 16};
+        const char* prefix = "r";
+#endif
+        put("[NFSU2 CRASH] pc "); hex(m.pc); put(" lr "); hex(m.lr); put(" sp "); hex(m.sp); put(" fp "); hex(m.fp); put("\n");
+        for (int r = 0; r < m.n; r += 4) {
+            put("[NFSU2 CRASH] ");
+            for (int k = r; k < r + 4 && k < m.n; ++k) { put(prefix); dec(k); put(k < 10 ? "  " : " "); hex(m.x[k]); put(" "); }
+            put("\n");
+        }
+        // Stack words that point into the executable: return addresses of the host frames still on the stack.
+        const uint64_t lo = reinterpret_cast<uint64_t>(&__executable_start), hi = reinterpret_cast<uint64_t>(&etext);
+        put("[NFSU2 CRASH] code addresses on the stack (offset from sp: address):\n");
+        int hits = 0;
+        // Never read past the mapping that holds sp: a fault inside the handler would cut the report short.
+        const uint64_t spBase = m.sp & ~7ull;
+        uint64_t limit = spBase;
+        if (int fd = ::open("/proc/self/maps", O_RDONLY); fd >= 0) {
+            size_t used = 0; ssize_t n;
+            while (used < sizeof g_maps - 1 && (n = ::read(fd, g_maps + used, sizeof g_maps - 1 - used)) > 0) used += static_cast<size_t>(n);
+            ::close(fd); g_maps[used] = 0;
+            for (char* line = g_maps; *line;) {
+                char* end = std::strchr(line, '\n'); if (end) *end = 0;
+                const char* p = line;
+                const uint64_t a = parseHex(p); if (*p == '-') ++p;
+                const uint64_t b = parseHex(p);
+                if (m.sp >= a && m.sp < b && line[0] && std::strstr(line, " rw")) limit = b;
+                if (!end) break;
+                line = end + 1;
+            }
+        }
+        const uint64_t* sp = reinterpret_cast<const uint64_t*>(spBase);
+        for (int i = 0; i < 2048 && hits < 40 && reinterpret_cast<uint64_t>(sp + i + 1) <= limit; ++i) {
+            const uint64_t v = sp[i];
+            if (v >= lo && v < hi) { put("  +"); dec(i * 8); put(": "); hex(v); put("\n"); ++hits; }
+        }
+    }
+    // The mapping that holds the fault address, and the 4 GB guest region (its start is the guest base).
+    int fd = ::open("/proc/self/maps", O_RDONLY);
+    if (fd >= 0) {
+        size_t used = 0; ssize_t n;
+        while (used < sizeof g_maps - 1 && (n = ::read(fd, g_maps + used, sizeof g_maps - 1 - used)) > 0) used += static_cast<size_t>(n);
+        ::close(fd); g_maps[used] = 0;
+        bool found = false; uint64_t guestBase = 0;
+        for (char* line = g_maps; *line;) {
+            char* end = std::strchr(line, '\n'); if (end) *end = 0;
+            const char* p = line;
+            const uint64_t a = parseHex(p); if (*p == '-') ++p;
+            const uint64_t b = parseHex(p);
+            if (b - a == (1ull << 32) && !guestBase) guestBase = a;
+            if (fault >= a && fault < b) { put("[NFSU2 CRASH] fault mapping: "); put(line); put("\n"); found = true; }
+            if (!end) break;
+            line = end + 1;
+        }
+        if (!found) put("[NFSU2 CRASH] fault address is in no mapping\n");
+        if (guestBase) {
+            put("[NFSU2 CRASH] guest region starts at "); hex(guestBase);
+            if (fault >= guestBase && fault < guestBase + (1ull << 32)) { put(", fault is guest address "); hex(fault - guestBase); }
+            put("\n");
+        }
+    }
+    put("[NFSU2 CRASH] end of report\n");
+    ::fsync(2);
+    // SA_RESETHAND restored the default action: returning re-runs the faulting instruction (or abort() raises again).
+}
+static void install() {
+    if (std::getenv("NFSU2_SEGV_TRACE") || std::getenv("NFSU2_NO_CRASH_REPORT")) return;   // the older backtrace tool, or opted out
+    stack_t ss{}; ss.ss_sp = g_altStack; ss.ss_size = sizeof g_altStack; ::sigaltstack(&ss, nullptr);
+    struct sigaction sa{};
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
+    sa.sa_sigaction = handler;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) ::sigaction(sig, &sa, nullptr);
+}
+}  // namespace crash
+
 SDL_Window* g_window = nullptr;
 std::atomic<bool> g_running{true};
 GuestBootWorker g_guestWorker;
@@ -461,6 +597,12 @@ int main(int argc, char** argv) {
 
     std::signal(SIGTERM, signalHandler);
     std::signal(SIGINT, signalHandler);
+    crash::install();
+#if defined(PR_SET_PTRACER)
+    // NFSU2_ALLOW_PTRACE=1: let a debugger of the same user attach (Ubuntu's ptrace_scope=1 allows only a parent), so a
+    // stuck game can be inspected with gdb -p without root. Diagnostics only.
+    if (std::getenv("NFSU2_ALLOW_PTRACE")) ::prctl(PR_SET_PTRACER, static_cast<unsigned long>(-1), 0, 0, 0);
+#endif
 
     std::printf("====================================================\n");
     std::printf(" NFSU2 Recompiled - R36S / Linux ARM64 PortMaster   \n");

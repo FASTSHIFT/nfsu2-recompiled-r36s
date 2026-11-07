@@ -52,7 +52,14 @@ static inline int mode(void) {
  * with the generic timer; printed every 600 frames ([NFSU2 SCENE] timing) */
 static int g_timing = -1;
 static uint64_t tTicks[2], tCalls[2];
+#if defined(__aarch64__)
 static inline uint64_t ticks(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
+static inline uint64_t tickFrequency(void) { uint64_t freq; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq)); return freq; }
+#else   /* x86-64 PC builds (software-GPU reproduction): a 1 GHz monotonic counter */
+#include <time.h>
+static inline uint64_t ticks(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+static inline uint64_t tickFrequency(void) { return 1000000000ull; }
+#endif
 static inline int timing(void) {
     if (g_timing < 0) { const char* e = getenv("NFSU2_SCENE_TIMING"); g_timing = e && e[0] == '1'; }
     return g_timing;
@@ -63,7 +70,7 @@ static void timingReport(void) {
     if (now == f) return;
     f = now;
     if (now % 600 || !tCalls[0]) return;
-    uint64_t freq; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    const uint64_t freq = tickFrequency();
     printf("[NFSU2 SCENE] timing (%s): model %llu calls %.3f us/call, walk %llu calls %.3f us/call\n", mode() ? "native" : "lifted",
            (unsigned long long)tCalls[0], tTicks[0] * 1e6 / freq / tCalls[0], (unsigned long long)tCalls[1], tCalls[1] ? tTicks[1] * 1e6 / freq / tCalls[1] : 0.0);
 }

@@ -167,7 +167,11 @@ void profHandler(int, siginfo_t*, void* uc) {
     if (!g_profOn.load(std::memory_order_relaxed)) return;
     const int i = g_profCount.fetch_add(1, std::memory_order_relaxed);
     if (i >= kProfMax) return;
+#if defined(__aarch64__)
     g_profPc[i] = static_cast<ucontext_t*>(uc)->uc_mcontext.pc;
+#else
+    g_profPc[i] = static_cast<uint64_t>(static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]);   // x86-64 PC build
+#endif
     g_profTid[i] = static_cast<uint32_t>(syscall(SYS_gettid));
 }
 // Wall-clock samples of the game thread (CLOCK_MONOTONIC, 1 kHz, own signal): unlike the CPU-time samples
