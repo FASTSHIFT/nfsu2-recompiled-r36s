@@ -93,7 +93,7 @@ void createFile(){
     }
     int descriptor=disposition==3&&!(access&0x40000000u)&&discCheckSwitch(path) ? ::open("/dev/null",O_RDONLY|O_CLOEXEC) : ::open(path.c_str(),options|O_CLOEXEC,0600);
     NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest file %s access=%x disposition=%u",path.filename().string().c_str(),access,disposition);
-    if(descriptor<0){lastError=fileError();ret(UINT32_MAX,7);return;}uint32_t handle=nextFileHandle++;fileHandles.emplace(handle,descriptor);if(lower(path.extension().string())==".vp6"){movieHandles.insert(handle);movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie %s opened (%zu open) at frame %u",path.filename().string().c_str(),movieHandles.size(),getD3D9PresentCount());}lastError=(disposition==2||disposition==4)&&existed?183:0;ret(handle,7);
+    if(descriptor<0){if(access&0x40000000u)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest file %s could not be opened for writing: %s",path.string().c_str(),std::strerror(errno));lastError=fileError();ret(UINT32_MAX,7);return;}uint32_t handle=nextFileHandle++;fileHandles.emplace(handle,descriptor);if(lower(path.extension().string())==".vp6"){movieHandles.insert(handle);movieOpenCount=int(movieHandles.size());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest movie %s opened (%zu open) at frame %u",path.filename().string().c_str(),movieHandles.size(),getD3D9PresentCount());}lastError=(disposition==2||disposition==4)&&existed?183:0;ret(handle,7);
 }
 void readFile(){
     auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,5);return;}if(arg(4))throw GuestStop("Overlapped ReadFile pending");
@@ -109,7 +109,7 @@ void writeFile(){
     auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,5);return;}
     if(!memory->readable(arg(1),arg(2))){lastError=1784;ret(0,5);return;}
     ssize_t count;do{count=::write(file->second,ptr(arg(1),arg(2)),arg(2));}while(count<0&&errno==EINTR);
-    if(count<0){lastError=fileError();ret(0,5);return;}write32(arg(3),uint32_t(count));ret(1,5);
+    if(count<0){NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest WriteFile failed: %s",std::strerror(errno));lastError=fileError();ret(0,5);return;}write32(arg(3),uint32_t(count));ret(1,5);
 }
 void flushFileBuffers(){auto file=fileHandles.find(arg(0));if(file==fileHandles.end()){lastError=6;ret(0,1);return;}
     int result;do{result=::fsync(file->second);}while(result&&errno==EINTR);if(result){lastError=fileError();ret(0,1);return;}ret(1,1);
@@ -176,6 +176,7 @@ void findFirstFile(){
         gamePath(logical);search.paths.push_back(entry.path());
     }
     if(error){lastError=error==std::errc::no_such_file_or_directory?3:5;ret(UINT32_MAX,2);return;}
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest FindFirstFile %s -> %zu entries",requested.c_str(),search.paths.size());
     if(search.paths.empty()){lastError=2;ret(UINT32_MAX,2);return;}
     std::sort(search.paths.begin(),search.paths.end());
     if(!writeFindData(arg(1),search.paths.front())){ret(UINT32_MAX,2);return;}
@@ -187,7 +188,8 @@ void findNextFile(){auto found=fileSearches.find(arg(0));if(found==fileSearches.
 }
 void findClose(){if(!fileSearches.erase(arg(0))){lastError=6;ret(0,1);return;}ret(1,1);}
 void createDirectory(){if(arg(1))throw GuestStop("CreateDirectory security attributes pending");auto path=gamePath(guestString(arg(0)));
-    if(::mkdir(path.c_str(),0700)){lastError=errno==EEXIST?183:fileError();ret(0,2);return;}ret(1,2);
+    const int made=::mkdir(path.c_str(),0700);NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest CreateDirectory %s -> %s",path.string().c_str(),made?std::strerror(errno):"ok");
+    if(made){lastError=errno==EEXIST?183:fileError();ret(0,2);return;}ret(1,2);
 }
 void fullPathName(){
     auto requested=guestString(arg(0));if(requested.empty()){lastError=123;ret(0,4);return;}
@@ -202,7 +204,8 @@ void fullPathName(){
 // DeleteFileA / MoveFileA inside the game folder (gamePath refuses anything outside it).
 void deleteFile(){
     auto path=gamePath(guestString(arg(0)));
-    if(::unlink(path.c_str())){lastError=fileError();ret(0,1);return;}
+    const int gone=::unlink(path.c_str());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest DeleteFile %s -> %s",path.string().c_str(),gone?std::strerror(errno):"ok");
+    if(gone){lastError=fileError();ret(0,1);return;}
     forgetResolvedGamePaths();lastError=0;ret(1,1);
 }
 void removeDirectory(){
@@ -213,7 +216,8 @@ void removeDirectory(){
 void moveFile(){
     auto from=gamePath(guestString(arg(0))),to=gamePath(guestString(arg(1)));
     struct stat status{};if(!::stat(to.c_str(),&status)){lastError=183;ret(0,2);return;}  // ERROR_ALREADY_EXISTS
-    if(::rename(from.c_str(),to.c_str())){lastError=fileError();ret(0,2);return;}
+    const int moved=::rename(from.c_str(),to.c_str());NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Guest MoveFile %s -> %s: %s",from.string().c_str(),to.string().c_str(),moved?std::strerror(errno):"ok");
+    if(moved){lastError=fileError();ret(0,2);return;}
     forgetResolvedGamePaths();lastError=0;ret(1,2);
 }
 // GetFileTime(handle, creation, access, write): FILETIME is 100 ns ticks since 1601.
