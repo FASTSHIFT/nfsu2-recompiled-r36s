@@ -37,6 +37,11 @@ Copy the files to your SD card (either `TF1` or `TF2/EASYROMS`) under the `ports
 > * **v12** (European retail v1.2, SecuROM removed): `4,800,512 bytes`, MD5 `6445adbf4e8d64be51e96a69bba168a4`, SHA-256 `f9dd86c054878ce6276beb07c1fd61874f7a1e4bf1f241b084c65b73e24168a7`
 > * The retail `SPEED2.EXE` with SecuROM (5,987,978 bytes) does not work, nor do other builds (v1.1, other v1.0 dumps): the launcher stops with a message.
 
+> **Complete car data**: the game picks AI and traffic cars from its whole car list, whatever region the install is.
+> `gamedata/CARS/` needs all of `CIVIC`, `RSX`, `CORSA` and `PEUGOT106`. Some regional installs leave out two of them
+> (European discs have no `CIVIC`/`RSX`, others no `CORSA`/`PEUGOT106`); copy the missing folders from another NFSU2 PC
+> install. Without them the game sits on "Loading" when it picks one of those cars (see Troubleshooting).
+
 ---
 
 ## 🛠️ Building `nfsu2.aarch64` yourself (optional)
@@ -125,6 +130,9 @@ Button names are the labels printed on the R36S. The layout follows the PS2 vers
   version; send that line. `log.txt` also reports `glibc compat: newer libm functions` (the running glibc has the
   faster math functions) or `glibc compat: GLIBC_2.17 libm functions` (older glibc; same results, slightly slower
   `log`/`pow`). `NFSU2_GLIBC_COMPAT_OLD=1` forces the second case for testing.
+- **Stuck on "Loading" (free roam, a race)**: look for `MISSING GAME DATA` in `ports/nfsu2/log.txt`. A missing
+  `CARS/<car>` folder (usually `CIVIC` or `RSX`) leaves the game waiting for that car forever; copy the folder from a
+  complete NFSU2 PC install (see "Complete car data" above).
 - **Black screen on launch**: Verify that `SPEED2.EXE` is present inside `gamedata/`. Check `ports/nfsu2/log.txt` for details.
 - **Controls not responding**: Ensure `gamecontrollerdb.txt` exists in PortMaster, or verify controller configuration in EmulationStation.
 - **Audio stutter**: Ensure CPU governor is set to `performance` in the launch script.
