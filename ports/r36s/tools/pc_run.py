@@ -14,6 +14,7 @@ ES_LOG = "/home/ark/.emulationstation/es_log.txt"
 OUT, TSV = "/tmp/pcrun.out", "/tmp/pcrun.tsv"
 EVDEV = "/dev/input/event2"
 BTN_A, BTN_B, BTN_SELECT, BTN_START = 305, 304, 704, 705
+BTN_CONFIRM = BTN_START      # confirm in the game menus: START (Enter) goes all the way into a race; A is "back" there
 # evdev codes of the R36S pad; SDL/vkbd names: 'WEST' (printed Y, left) = 307 = backspace in the on-screen keyboard,
 # 'NORTH' (printed X, top) = 308 = shift there.
 PAD = {'A': 305, 'B': 304, 'WEST': 307, 'NORTH': 308, 'L1': 310, 'R1': 311, 'L2': 312, 'R2': 313, 'UP': 544, 'DOWN': 545, 'LEFT': 546, 'RIGHT': 547, 'SELECT': 704, 'START': 705, 'R3': 707, 'L3': 706}
@@ -74,9 +75,9 @@ ap.add_argument("--load-timeout", dest="load_timeout", type=int, default=120, he
 ap.add_argument("--nwin", type=int, default=2, help="with --drive: PERF windows (120 frames each) to average once loading has settled")
 ap.add_argument("--settle", type=int, default=10, help="with --drive: seconds after the track stream opens before measuring (countdown, start)")
 ap.add_argument("--window", type=int, default=12, help="with --drive: seconds to measure after the first busy race frame")
-ap.add_argument("--tap-every", dest="tap_every", type=float, default=0, help="tap B every N seconds (menu exploration, no race logic)")
+ap.add_argument("--tap-every", dest="tap_every", type=float, default=0, help="tap START every N seconds (menu exploration, no race logic)")
 ap.add_argument("--seq", default="", help="timed pad taps, seconds since the game started: '14:B,16:RIGHT,18:RIGHT' (A B WEST NORTH UP DOWN LEFT RIGHT START SELECT L1 R1 L3 R3)")
-ap.add_argument("--drive", action="store_true", help="tap B (confirm) until the race loads, then hold B (accelerate)")
+ap.add_argument("--drive", action="store_true", help="tap START (confirm) until the race loads, then hold B (accelerate)")
 a = ap.parse_args()
 
 open(OUT, "w").close(); open(TSV, "w").close()
@@ -120,7 +121,7 @@ try:
             due = [e for e in seq if (e[0] is None and time.time() - t0 >= e[1]) or (e[0] is not None and e[0] in anchors and time.time() - anchors[e[0]] >= e[1])]
             for e in due:
                 seq.remove(e); tap([PAD[e[2]]], 0.15); say("seq: %s (F%s+%.1f) at t=%.0fs" % (e[2], e[0], e[1], time.time() - t0))
-        if a.tap_every and not a.drive and tick % max(1, int(a.tap_every / TICK)) == 0 and tick > 4 / TICK: tap([BTN_B], 0.12)
+        if a.tap_every and not a.drive and tick % max(1, int(a.tap_every / TICK)) == 0 and tick > 4 / TICK: tap([BTN_CONFIRM], 0.12)
         if a.drive and os.path.exists("/proc/%s" % p):
             lg = open(LOG, errors="replace").read() if tick % 4 == 0 else ""
             # Loading time varies a lot (cold SD card: minutes). The race assets are loaded last: the track stream
@@ -134,7 +135,7 @@ try:
                 open("/tmp/pcrun.hang.txt", "w").write(sh("echo ark | sudo -S gdb -p %s -batch -ex 'set pagination off' -ex 'thread apply all bt 14' 2>&1 | grep -v '^\\[New\\|^warning\\|Reading symbols' | cut -c1-200" % p))
                 break
             if race_at is None:
-                if ingame_at is None and tick % 2 == 0: tap([BTN_B], 0.1)   # a confirm every 0.5 s while in the menus
+                if ingame_at is None and tick % 2 == 0: tap([BTN_CONFIRM], 0.1)   # a START every 0.5 s while in the menus
             else:
                 if not held:
                     d = evdev.InputDevice(EVDEV); d.write(evdev.ecodes.EV_KEY, BTN_B, 1); d.write(evdev.ecodes.EV_SYN, 0, 0)
