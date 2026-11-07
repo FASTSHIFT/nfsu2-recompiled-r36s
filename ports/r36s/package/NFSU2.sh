@@ -90,6 +90,10 @@ trap restore_clocks EXIT
 # Free reclaimable page caches to maximize contiguous memory before launching
 sync
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 || true
+# LAN play pings the server through an unprivileged ICMP socket before joining. Some
+# firmwares ship ping_group_range as "1 0" (nobody allowed), so socket() fails with
+# EACCES and the game reports a lost connection to the EA server.
+echo "0 2147483647" | sudo tee /proc/sys/net/ipv4/ping_group_range > /dev/null 2>&1 || true
 
 # Ensure safety swapfile to prevent OOM Killer from terminating the game during high texture loads
 SWAP_TOTAL=$(free -m | awk '/Swap:/ {print $2}')
