@@ -473,7 +473,13 @@ void systemMetrics(){
     case 0:case 16:case 59:case 61:case 78:value=displayWidth.load();break;
     case 1:case 17:case 60:case 62:case 79:value=displayHeight.load();break;
     case 2:case 3:case 4:case 5:case 6:case 7:case 8:case 32:case 33:case 76:case 77:value=0;break;
+#if defined(NFS_R36S)
+    case 19:value=guestPointerActive.load()?1:0;break;   // SM_MOUSEPRESENT: only while the virtual mouse is on
+    case 43:value=guestPointerActive.load()?2:0;break;   // SM_CMOUSEBUTTONS
+    case 23:value=0;break;
+#else
     case 19:case 23:case 43:value=0;break; // No physical mouse declared by the Android host yet.
+#endif
     case 80:value=1;break;
     default:throw GuestStop("GetSystemMetrics index pending: "+std::to_string(index));
     }

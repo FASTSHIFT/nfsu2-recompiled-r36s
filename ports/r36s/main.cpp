@@ -134,6 +134,49 @@ static void vkbdSetVisible(bool visible) {
     std::printf("[NFSU2] Virtual keyboard %s\n", visible ? "opened" : "closed");
 }
 
+// Virtual mouse for the few screens that want one (hosting a LAN server ...). Select + L3 switches it on and off:
+// the right stick moves the pointer, R1 is the left button. NFSU2_MOUSE_SPEED scales the speed (default 1).
+struct MouseMode {
+    bool on = false, left = false;
+    float x = 0.5f, y = 0.5f, sx = 0, sy = 0;
+    std::chrono::steady_clock::time_point last{};
+};
+static MouseMode g_mouse;
+static float mouseSpeed() {
+    static const float s = [] { const char* e = std::getenv("NFSU2_MOUSE_SPEED"); const float v = e ? static_cast<float>(std::atof(e)) : 1.0f; return v > 0.05f ? v : 1.0f; }();
+    return s;
+}
+static void mouseToggle() {
+    g_mouse.on = !g_mouse.on;
+    if (g_mouse.on) { g_mouse.x = g_mouse.y = 0.5f; g_mouse.sx = g_mouse.sy = 0; g_mouse.last = std::chrono::steady_clock::now(); }
+    else if (g_mouse.left) { g_mouse.left = false; setGuestMouse(g_mouse.x, g_mouse.y, 2, false); }
+    setGuestMouseActive(g_mouse.on, g_mouse.x, g_mouse.y);
+    std::printf("[NFSU2] Virtual mouse %s\n", g_mouse.on ? "on (right stick moves, R1 clicks)" : "off");
+}
+// Right stick moves the pointer while the mouse is on. Returns true when the axis was used.
+static bool mouseHandleAxis(uint8_t axis, float v) {
+    if (!g_mouse.on) return false;
+    auto shape = [](float a) { const float m = std::fabs(a); if (m < 0.15f) return 0.0f; const float t = (m - 0.15f) / 0.85f; return (a < 0 ? -1.0f : 1.0f) * t * t; };
+    if (axis == SDL_CONTROLLER_AXIS_RIGHTX) { g_mouse.sx = shape(v); return true; }
+    if (axis == SDL_CONTROLLER_AXIS_RIGHTY) { g_mouse.sy = shape(v); return true; }
+    return false;
+}
+static bool mouseHandleButton(uint8_t button, bool down) {
+    if (!g_mouse.on || button != SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) return false;
+    if (g_mouse.left != down) { g_mouse.left = down; setGuestMouse(g_mouse.x, g_mouse.y, down ? 0 : 2, down); }
+    return true;
+}
+static void mouseTick() {
+    if (!g_mouse.on) return;
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::chrono::duration<float>(now - g_mouse.last).count();
+    g_mouse.last = now;
+    if (g_mouse.sx == 0 && g_mouse.sy == 0) return;
+    const float speed = 1.1f * mouseSpeed() * dt;    // full deflection: about one screen width per second
+    g_mouse.x = std::min(1.0f, std::max(0.0f, g_mouse.x + g_mouse.sx * speed));
+    g_mouse.y = std::min(1.0f, std::max(0.0f, g_mouse.y + g_mouse.sy * speed));
+    setGuestMouse(g_mouse.x, g_mouse.y, 1, g_mouse.left);
+}
 // Select is also a combo modifier: Select+Start quits, Select+R3 toggles the frame counter. Its own action
 // (reset car while driving) reaches the game only once no combo can follow: after it has been held for 200 ms,
 // or as a short tap when it is released sooner. A combo cancels it, so the car is not reset.
@@ -177,6 +220,12 @@ static bool selectHandleButton(uint8_t button, bool down) {
         g_select.combo = true;
         if (g_select.sent) { selectSend(false); g_select.sent = false; }
         toggleD3D9FpsCounter();
+        return true;
+    }
+    if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK) {   // Select + L3: virtual mouse
+        g_select.combo = true;
+        if (g_select.sent) { selectSend(false); g_select.sent = false; }
+        mouseToggle();
         return true;
     }
     if (button == SDL_CONTROLLER_BUTTON_START) {       // Select + Start: quit
@@ -823,6 +872,7 @@ int main(int argc, char** argv) {
 
                 case SDL_CONTROLLERAXISMOTION:
                     if (vkbdHandleAxis(event.caxis.axis, normalizeAxis(event.caxis.value))) break;
+                    if (mouseHandleAxis(event.caxis.axis, normalizeAxis(event.caxis.value))) break;
                     g_gamepad.axis(event.caxis.axis, event.caxis.value, guestDrivingControls(), padSetKey);
                     publishGamepad();
                     break;
@@ -835,8 +885,9 @@ int main(int argc, char** argv) {
                         std::printf("[NFSU2 PAD] %s\n", n ? n : "?");
                     }
                     // R3 released after Select + R3: nothing for the keyboard to do.
-                    if (!down && event.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK && g_select.combo) break;
+                    if (!down && (event.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK || event.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK) && g_select.combo) break;
                     if (selectHandleButton(event.cbutton.button, down)) break;
+                    if (mouseHandleButton(event.cbutton.button, down)) break;
                     const bool wasVisible = vkbd::state().visible.load();
                     if (vkbdHandleButton(event.cbutton.button, down)) {
                         // Opening the keyboard: release whatever the game saw held.
@@ -866,6 +917,7 @@ int main(int argc, char** argv) {
         // Virtual keyboard: release injected keys when their hold time is over.
         vkbdFlushPending(false);
         selectTick();
+        mouseTick();
         if (g_quitByCombo) g_running = false;
         // Remap held buttons when the game switches between menus and driving.
         if (g_gamepad.refresh(guestDrivingControls(), padSetKey)) publishGamepad();

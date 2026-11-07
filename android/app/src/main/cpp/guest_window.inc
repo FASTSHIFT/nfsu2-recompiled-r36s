@@ -105,7 +105,8 @@ void enqueueGuestText(const std::vector<uint32_t>& characters){
 #if defined(NFS_R36S)
 // No pointer device on the handhelds: the game's cursor rests on the window's last pixel, so its arrow is drawn
 // off-screen (a centred default made the front end draw its mouse cursor in the middle of every menu).
-std::atomic<float> guestPointerX{1.0f},guestPointerY{1.0f};
+std::atomic<float> guestPointerX{0.5f},guestPointerY{0.5f};
+std::atomic<bool> guestPointerActive{false};   // virtual mouse (Select + L3 on the handheld); off: the arrow stays off-screen
 #else
 std::atomic<float> guestPointerX{0.5f},guestPointerY{0.5f};
 #endif
@@ -116,7 +117,7 @@ std::pair<int32_t,int32_t> pointerInWindow(){
     if(window==windows.end())return {0,0};
     int32_t width=std::max(window->second.width,1),height=std::max(window->second.height,1);
 #if defined(NFS_R36S)
-    return {width+64,height+64};   // no pointer: just outside the window, so no part of the arrow is drawn
+    if(!guestPointerActive.load())return {width+64,height+64};   // no pointer: just outside the window, so no part of the arrow is drawn
 #endif
     return {std::min(int32_t(guestPointerX.load()*float(width)),width-1),std::min(int32_t(guestPointerY.load()*float(height)),height-1)};
 }

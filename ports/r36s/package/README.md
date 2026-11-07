@@ -76,6 +76,7 @@ Button names are the labels printed on the R36S. The layout follows the PS2 vers
 | **Select** | Reset car | — |
 | **Select + Start** | **Quit to the system menu** | **Quit to the system menu** |
 | **Select + R3** | Show/hide the frame counter | Show/hide the frame counter |
+| **Select + L3** | Virtual mouse on/off: right stick moves the pointer, R1 is the left button | same |
 
 ---
 

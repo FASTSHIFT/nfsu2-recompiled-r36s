@@ -25,6 +25,10 @@ void setGuestPointer(float x,float y,int phase);
 /** Posts WM_CHAR messages (the game's text fields read those); 8 is backspace. */
 void typeGuestText(const std::vector<uint32_t>& characters);
 void setGuestLanguage(const char* language);
+/** R36S virtual mouse: while on, the game sees a pointer at (x,y) (fractions of the game view); off parks it off-screen. */
+void setGuestMouseActive(bool on,float x,float y);
+/** Pointer move (event 1), left button down (0) or up (2) with the pointer at (x,y); leftDown is the button state after it. */
+void setGuestMouse(float x,float y,int event,bool leftDown);
 void setGuestResolution(unsigned width,unsigned height);
 void setGuestFrameLimit(unsigned framesPerSecond);
 

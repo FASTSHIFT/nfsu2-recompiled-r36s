@@ -1358,6 +1358,25 @@ void quiesceGuestFilesForExit(int timeoutMs){
 void setGuestPaused(bool paused) {guestPaused=paused;}
 bool guestDrivingControls() {return inputDrivingMode.load();}
 int guestMoviesOpen() {return movieOpenCount.load();}
+#if defined(NFS_R36S)
+void setGuestMouseActive(bool on,float x,float y){
+    guestPointerX=std::clamp(x,0.f,1.f);guestPointerY=std::clamp(y,0.f,1.f);guestPointerActive=on;
+    {std::lock_guard<std::mutex> lock(inputMutex);inputMouseButtons[0]=0;}
+    std::lock_guard<std::mutex> lock(messageMutex);
+    windowMessages.push_back({0,0x200u,0u,pointerPending,messageTime()});   // the game sees the pointer appear or leave
+}
+void setGuestMouse(float x,float y,int event,bool leftDown){
+    guestPointerX=std::clamp(x,0.f,1.f);guestPointerY=std::clamp(y,0.f,1.f);
+    {std::lock_guard<std::mutex> lock(inputMutex);inputMouseButtons[0]=leftDown?0x80:0;}
+    std::lock_guard<std::mutex> lock(messageMutex);
+    windowMessages.push_back({0,0x200u,leftDown?1u:0u,pointerPending,messageTime()});
+    if(event==0)windowMessages.push_back({0,0x201u,1u,pointerPending,messageTime()});
+    if(event==2)windowMessages.push_back({0,0x202u,0u,pointerPending,messageTime()});
+}
+#else
+void setGuestMouseActive(bool,float,float){}
+void setGuestMouse(float,float,int,bool){}
+#endif
 extern "C" int nfsGuestDriving(){return inputDrivingMode.load()?1:0;}
 void setGuestPad(const float axes[6],uint32_t buttons,int hatX,int hatY){
     std::lock_guard<std::mutex> lock(inputMutex);
