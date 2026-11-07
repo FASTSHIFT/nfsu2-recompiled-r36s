@@ -115,6 +115,30 @@ else
 fi
 python3 "$R/scripts/exe_variant.py" current
 
+# server.dll (EA's LAN game server): lifted from a copy relocated to its guest base, next to SPEED2.EXE's code, so
+# that hosting a LAN game works. Optional: without the file, or if it does not fit the lifted layout, the build
+# goes on and hosting reports an error. scripts/prepare_module.py + run_lift.py --prefix server_.
+step "3b. server.dll"
+SGEN="$R/src/recomp/gen_server"
+if [ -n "${SERVER_DLL:-}" ] && [ -f "$SERVER_DLL" ]; then
+  SKEY=$( { sha1sum "$SERVER_DLL" | cut -d' ' -f1; echo "$PATCHKEY"; cat "$SRC"/scripts/run_lift.py "$SRC"/scripts/prepare_module.py; } | tr -d '\r' | sha1sum | cut -d' ' -f1)
+  if [ "$(cat "$SGEN/.lift-done" 2>/dev/null)" != "$SKEY" ]; then
+    rm -rf "$SGEN"; mkdir -p "$SGEN"
+    if ( cd "$R" &&
+         python3 scripts/prepare_module.py "$SERVER_DLL" 0x00A00000 "$L/server.analysis.dll" "$L/server_seeds.json" &&
+         python3 scripts/run_lift.py catalog "$L/server.analysis.dll" "$L/server_seeds.json" "$L/server_catalog.json" &&
+         python3 scripts/run_lift.py lift "$L/server.analysis.dll" "$L/server_catalog.json" "$SGEN" --prefix server_ ); then
+      echo "$SKEY" > "$SGEN/.lift-done"
+    else
+      echo "WARNING: server.dll could not be lifted; LAN hosting will not be available"; rm -rf "$SGEN"
+    fi
+  else
+    echo "lifted code for this server.dll already in $SGEN"
+  fi
+else
+  echo "no server.dll given (SERVER_DLL): LAN hosting will not be available"; rm -rf "$SGEN"
+fi
+
 step "4. guest objects ($JOBS jobs)"
 cd "$R"
 for pass in 1 2 3; do

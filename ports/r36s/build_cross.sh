@@ -37,6 +37,8 @@ VARIANT="$(sed -n 's/^#define NFS_EXE_VARIANT \([0-9]*\).*/\1/p' "$VH" | tr -d '
 VID="$(sed -n 's/^#define NFS_EXE_LIFTED_ID "\([a-z0-9]*\)".*/\1/p' "$VH" | tr -d '\r')"
 [ -n "$VARIANT" ] && [ -n "$VID" ] || { echo "ERROR: $VH names no exe variant"; exit 1; }
 APPDEF="$APPDEF -DNFS_EXE_VARIANT=$VARIANT"
+# server.dll was lifted into the guest objects: the runtime can load it for LAN hosting (guest_modules.inc)
+if ls "$GUEST_DIR"/server_recomp_*.o >/dev/null 2>&1; then APPDEF="$APPDEF -DNFS_SERVER_DLL"; echo "LAN hosting: server.dll is part of this build"; fi
 echo "host runtime for SPEED2.EXE variant $VARIANT ($VID)"
 OPT="-O2 -g -DNDEBUG -fno-strict-aliasing -ffp-contract=off -mcpu=cortex-a35 -mtune=cortex-a35"
 

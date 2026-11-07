@@ -23,6 +23,8 @@ Options:
                      GitHub CLI, gh, signed in with write access to the repository)
 
 Several exes can be given at once (e.g. a v1.0 and a v1.2 SPEED2.EXE); each is built in turn.
+    --server-dll F   the game's server.dll (EA's LAN game server). With it the binary can host a LAN game; without
+                     it hosting reports an error. Default: server.dll next to SPEED2.EXE, if there is one
     --jobs N         parallel compiles (default: automatic)
     --check          only check the exe and the tools, build nothing
     --clean          delete the cached work (Docker volume or native work folder) and stop
@@ -166,7 +168,7 @@ GUEST_RELEASE = "r36s-guest-objs"
 DEFAULT_REPO = "manuelpllull/nfsu2-recompiled-r36s"
 
 
-def build_docker(exe, out, jobs, log, export=False, image_done=[False]):
+def build_docker(exe, out, jobs, log, export=False, server_dll=None, image_done=[False]):
     if not image_done[0]:
         say("\n== Docker image")
         run(["docker", "build", "-t", IMAGE, "-f", os.path.join(ROOT, "docker", "Dockerfile.r36s-build"),
@@ -181,6 +183,9 @@ def build_docker(exe, out, jobs, log, export=False, image_done=[False]):
            "-e", f"EXE=/exe/{os.path.basename(exe)}"]
     if jobs:
         cmd += ["-e", f"NFSU2_JOBS={jobs}"]
+    if server_dll:
+        cmd += ["--mount", f"type=bind,source={os.path.dirname(server_dll)},target=/server,readonly",
+                "-e", f"SERVER_DLL=/server/{os.path.basename(server_dll)}"]
     if export:
         cmd += ["-e", "EXPORT_GUEST=1"]
     if SYSTEM == "Linux" and hasattr(os, "getuid"):
@@ -189,7 +194,7 @@ def build_docker(exe, out, jobs, log, export=False, image_done=[False]):
     run(cmd, log)
 
 
-def build_native(exe, out, jobs, log, work=NATIVE_WORK, export=False):
+def build_native(exe, out, jobs, log, work=NATIVE_WORK, export=False, server_dll=None):
     if SYSTEM != "Linux":
         fail("--native works on Linux only (on Windows it works inside WSL2 Ubuntu); use Docker here, "
              "or --lift-only to lift without compiling")
@@ -198,6 +203,8 @@ def build_native(exe, out, jobs, log, work=NATIVE_WORK, export=False):
         env["NFSU2_JOBS"] = str(jobs)
     if export:
         env["EXPORT_GUEST"] = "1"
+    if server_dll:
+        env["SERVER_DLL"] = server_dll
     say(f"\n== Lift and compile natively (work folder {work}; first time: 30-90 minutes)")
     run(["bash", os.path.join(ROOT, "docker", "r36s_build.sh")], log, env=env)
 
@@ -385,6 +392,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "r36s"), help="output folder")
     ap.add_argument("--install", metavar="PORT_DIR", help="copy the binary into this port folder")
     ap.add_argument("--native", action="store_true", help="Linux: build without Docker")
+    ap.add_argument("--server-dll", metavar="FILE", help="server.dll of the game (adds LAN hosting)")
     ap.add_argument("--jobs", type=int, help="parallel compiles")
     ap.add_argument("--check", action="store_true", help="check the exe and tools only")
     ap.add_argument("--clean", action="store_true", help="delete the cached work and stop")
@@ -462,10 +470,18 @@ def main():
     for exe, variant in zip(exes, variants):
         t0 = time.time()
         say(f"\n######## SPEED2.EXE {variant['id']}: {exe}")
+        server_dll = None
+        if a.server_dll:
+            server_dll = os.path.abspath(os.path.expanduser(a.server_dll))
+            if not os.path.isfile(server_dll):
+                fail(f"--server-dll: {server_dll} is not a file")
+        elif os.path.isfile(os.path.join(os.path.dirname(exe), "server.dll")):
+            server_dll = os.path.join(os.path.dirname(exe), "server.dll")
+        say(f"  server.dll: {server_dll or 'none (LAN hosting will report an error)'}")
         if a.native:
-            build_native(exe, out, a.jobs, log, work, a.export_guest)
+            build_native(exe, out, a.jobs, log, work, a.export_guest, server_dll)
         else:
-            build_docker(exe, out, a.jobs, log, a.export_guest)
+            build_docker(exe, out, a.jobs, log, a.export_guest, server_dll)
         binary = os.path.join(out, f"nfsu2-{variant['id']}.aarch64")
         if not os.path.isfile(binary):
             fail(f"the build ended without {binary}; see {log}")

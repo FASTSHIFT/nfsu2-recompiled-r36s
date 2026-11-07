@@ -45,6 +45,9 @@ for f in "$ROOT"/src/recomp/gen/recomp_*.c; do
     SRCS+=("$f")
   fi
 done
+# server.dll (LAN hosting), lifted next to the game by docker/r36s_build.sh: server_recomp_*.c in src/recomp/gen_server.
+SGEN="$ROOT/src/recomp/gen_server"
+for f in "$SGEN"/server_recomp_*.c; do [ -f "$f" ] && SRCS+=("$f"); done
 # Lifted functions replaced by native code (fx_cache.c / hud_half.c / world_cull.c / native_math.c / native_scene.c
 # / guest_runtime.cpp), named by their v10 address; scripts/exe_variant.py turns them into the names of the exe
 # src/recomp/gen was lifted from. Their definitions are renamed *_orig in a copy of the source that defines them,
@@ -75,7 +78,7 @@ for src in "${SRCS[@]}"; do
   fresh "$obj" "$src" && continue
   [ $(( $(date +%s) - start )) -ge "$BUDGET" ] && break
   while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.5; done
-  F="$FLAGS"; case "$(basename "$src")" in "${BIGSTEM}"_part_*) F="$FLAGS $BIG_OPT";; esac
+  F="$FLAGS"; case "$(basename "$src")" in "${BIGSTEM}"_part_*) F="$FLAGS $BIG_OPT";; server_recomp_*) F="$FLAGS -UNFS_X87_LW -I$SGEN";; esac   # nfs_lw.h only describes SPEED2.EXE's functions
   cc_src="$src"; wrap="$(awk -v s="$src" '$2 == s {print $1}' "$WRAPMAP" | tr '\n' ' ')"
   if [ -n "$wrap" ]; then
     cc_src="$GUEST_OUT/$(basename "$src" .c).wrap.c"
