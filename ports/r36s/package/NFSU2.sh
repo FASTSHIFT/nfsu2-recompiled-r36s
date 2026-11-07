@@ -52,6 +52,9 @@ if [ -f nfsu2.aarch64.update.sha1 ] && ls nfsu2.aarch64.part* >/dev/null 2>&1; t
 fi
 
 export DEVICE_ARCH="aarch64"
+# Options the game saves in its registry (graphics menu ...) are kept here between runs; delete the file to go back
+# to the NFSU2_GRAPHICS preset below.
+export NFSU2_REGISTRY_FILE="$GAMEDIR/registry.cfg"
 export LD_LIBRARY_PATH="$GAMEDIR/libs:$LD_LIBRARY_PATH"
 [ -n "$sdl_controllerconfig" ] && export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 
